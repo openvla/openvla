@@ -119,6 +119,7 @@ def finetune(cfg: FinetuneConfig) -> None:
     distributed_state = PartialState()
     torch.cuda.set_device(device_id := distributed_state.local_process_index)
     torch.cuda.empty_cache()
+    dist.init_process_group(backend='nccl', init_method='env://')
 
     # Configure Unique Experiment ID & Log Directory
     exp_id = (
