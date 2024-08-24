@@ -183,6 +183,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         vla.print_trainable_parameters()
 
     # Wrap VLA in PyTorch DDP Wrapper for Multi-GPU Training
+    dist.init_process_group(backend='nccl', init_method='env://')  # must be called before DDP(...)
     vla = DDP(vla, device_ids=[device_id], find_unused_parameters=True, gradient_as_bucket_view=True)
 
     # Create Optimizer =>> note that we default to a simple constant learning rate!
