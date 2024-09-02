@@ -183,6 +183,7 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Wrap VLA in PyTorch DDP Wrapper for Multi-GPU Training
     vla = DDP(vla, device_ids=[device_id], find_unused_parameters=True, gradient_as_bucket_view=True)
+    vla._set_static_graph()   # <---- ADD THIS LINE
 
     # Create Optimizer =>> note that we default to a simple constant learning rate!
     trainable_params = [param for param in vla.parameters() if param.requires_grad]
