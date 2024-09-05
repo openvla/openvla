@@ -824,6 +824,26 @@ def tdroid_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     return trajectory
 
 
+def expert_demos_oxe_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Sample transform for SERL demos in Open X-Embodiment mixture.
+    """
+    trajectory["action"] = tf.concat(
+        [
+            trajectory["action"][:, :6],
+            binarize_gripper_actions(trajectory["action"][:, -1])[:, None],
+        ],
+        axis=1,
+    )
+    size = tf.shape(trajectory["observation"]["state"])[0]
+    # trajectory["language_instruction"] = tf.constant("Pick up the orange blob", dtype=tf.string)
+    # trajectory["language_instruction"] = tf.fill((size,), "Pick up the orange blob", dtype=tf.string)
+    trajectory["language_instruction"] = trajectory["language_text"]
+    trajectory["observation"]["EEF_state"] = trajectory["observation"]["state"][:, :6]
+    trajectory["observation"]["gripper_state"] = trajectory["observation"]["state"][:, -1:]
+    return trajectory
+
+
 # === Registry ===
 OXE_STANDARDIZATION_TRANSFORMS = {
     "bridge_oxe": bridge_oxe_dataset_transform,
@@ -897,4 +917,6 @@ OXE_STANDARDIZATION_TRANSFORMS = {
     "tdroid_cover_object_with_towel": tdroid_dataset_transform,
     ### DROID Finetuning datasets
     "droid_wipe": droid_finetuning_transform,
+    ### Custom Finetuning datasets
+    "expert_demos": expert_demos_oxe_dataset_transform,
 }
