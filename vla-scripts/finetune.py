@@ -29,25 +29,23 @@ import draccus
 import torch
 import torch.distributed as dist
 import tqdm
+import wandb
 from accelerate import PartialState
 from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
-from transformers import AutoModelForVision2Seq, AutoProcessor, BitsAndBytesConfig
-from transformers import AutoConfig, AutoImageProcessor
+from transformers import AutoConfig, AutoImageProcessor, AutoModelForVision2Seq, AutoProcessor, BitsAndBytesConfig
 from transformers.modeling_outputs import CausalLMOutputWithPast
-
-import wandb
-from prismatic.models.backbones.llm.prompting import PurePromptBuilder, VicunaV15ChatPromptBuilder
-from prismatic.util.data_utils import PaddedCollatorForActionPrediction
-from prismatic.vla.action_tokenizer import ActionTokenizer
-from prismatic.vla.datasets import RLDSBatchTransform, RLDSDataset
-from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics
 
 from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
 from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
+from prismatic.models.backbones.llm.prompting import PurePromptBuilder, VicunaV15ChatPromptBuilder
+from prismatic.util.data_utils import PaddedCollatorForActionPrediction
+from prismatic.vla.action_tokenizer import ActionTokenizer
+from prismatic.vla.datasets import RLDSBatchTransform, RLDSDataset
+from prismatic.vla.datasets.rlds.utils.data_utils import get_dataset_statistics_json
 
 # Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -154,13 +152,12 @@ def finetune(cfg: FinetuneConfig) -> None:
     AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
 
     # Load OpenVLA Processor and Model using HF AutoClasses
-    processor = AutoProcessor.from_pretrained(cfg.vla_path, trust_remote_code=True)
+    processor = AutoProcessor.from_pretrained(cfg.vla_path)
     vla = AutoModelForVision2Seq.from_pretrained(
         cfg.vla_path,
         torch_dtype=torch.bfloat16,
         quantization_config=quantization_config,
         low_cpu_mem_usage=True,
-        trust_remote_code=True,
     )
 
     # Device Placement =>> note that BitsAndBytes automatically handles for quantized training
@@ -180,13 +177,6 @@ def finetune(cfg: FinetuneConfig) -> None:
         )
         vla = get_peft_model(vla, lora_config)
         vla.print_trainable_parameters()
-
-    # Wrap VLA in PyTorch DDP Wrapper for Multi-GPU Training
-    vla = DDP(vla, device_ids=[device_id], find_unused_parameters=True, gradient_as_bucket_view=True)
-
-    # Create Optimizer =>> note that we default to a simple constant learning rate!
-    trainable_params = [param for param in vla.parameters() if param.requires_grad]
-    optimizer = AdamW(trainable_params, lr=cfg.learning_rate)
 
     # Create Action Tokenizer
     action_tokenizer = ActionTokenizer(processor.tokenizer)
@@ -222,8 +212,8 @@ def finetune(cfg: FinetuneConfig) -> None:
     )
 
     # [Important] Save Dataset Statistics =>> used to de-normalize actions for inference!
-    if distributed_state.is_main_process:
-        save_dataset_statistics(vla_dataset.dataset_statistics, run_dir)
+    new_dataset_norm_stats = get_dataset_statistics_json(vla_dataset.dataset_statistics)
+    vla.update_normalization_stats(new_dataset_norm_stats)
 
     # Create Collator and DataLoader
     collator = PaddedCollatorForActionPrediction(
@@ -236,6 +226,13 @@ def finetune(cfg: FinetuneConfig) -> None:
         collate_fn=collator,
         num_workers=0,  # Important =>> Set to 0 if using RLDS; TFDS rolls its own parallelism!
     )
+
+    # Wrap VLA in PyTorch DDP Wrapper for Multi-GPU Training
+    vla = DDP(vla, device_ids=[device_id], find_unused_parameters=True, gradient_as_bucket_view=True)
+
+    # Create Optimizer =>> note that we default to a simple constant learning rate!
+    trainable_params = [param for param in vla.parameters() if param.requires_grad]
+    optimizer = AdamW(trainable_params, lr=cfg.learning_rate)
 
     # Initialize Logging =>> W&B
     if distributed_state.is_main_process:
@@ -350,9 +347,6 @@ def finetune(cfg: FinetuneConfig) -> None:
                             # Prepare to save checkpoint in new directory
                             checkpoint_dir = Path(str(run_dir) + f"--{gradient_step_idx}_chkpt")
                             os.makedirs(checkpoint_dir, exist_ok=True)
-
-                            # Save dataset statistics to new directory
-                            save_dataset_statistics(vla_dataset.dataset_statistics, checkpoint_dir)
 
                             # Save processor and model weights to new directory
                             processor.save_pretrained(checkpoint_dir)

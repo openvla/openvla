@@ -560,3 +560,15 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         """Get all the logged statistics for the given dataset."""
         unnorm_key = self._check_unnorm_key(self.norm_stats, unnorm_key)
         return self.norm_stats[unnorm_key]["action"]
+
+    def update_normalization_stats(self, new_norm_stats: Dict, overwrite: bool = False) -> None:
+        """Update the normalization statistics in `self.config` with new dataset stats, overwriting if necessary."""
+        keys_to_overwrite = self.config.norm_stats.keys() & new_norm_stats.keys()
+        if (not overwrite) and len(keys_to_overwrite) > 0:
+            raise ValueError(
+                f"New normalization statistics contains pre-existing keys: `{keys_to_overwrite}`; "
+                f"Pass `overwrite=True` to override (but be careful)!"
+            )
+
+        # Update `self.config.norm_stats`
+        self.config.update(new_norm_stats)
