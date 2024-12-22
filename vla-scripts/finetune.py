@@ -275,7 +275,13 @@ def finetune(cfg: FinetuneConfig) -> None:
         optimizer.zero_grad()
         # TODO: Debug
 
-        for epoch in tqdm.tqdm(range(num_epochs), desc="Epoch"):
+        # Compute the number of epochs needed to train for cfg.max_steps steps
+        #   =>> This is used to set the number of epochs in the progress bar
+        steps_per_epoch = len(dataloader)  # number of batches per epoch
+        min_epochs = (cfg.max_steps * cfg.grad_accumulation_steps) // steps_per_epoch + 1
+        num_epochs = min_epochs
+
+        for _ in range(num_epochs):
             for batch_idx, batch in enumerate(dataloader):
                 with torch.autocast("cuda", dtype=torch.bfloat16):
                     output: CausalLMOutputWithPast = vla(
@@ -341,7 +347,10 @@ def finetune(cfg: FinetuneConfig) -> None:
                     )
 
                 # Optimizer Step
-                if (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
+                if (
+                    (batch_idx + 1) % cfg.grad_accumulation_steps == 0
+                    or batch_idx == len(dataloader) - 1
+                ):
                     optimizer.step()
                     optimizer.zero_grad()
                     progress.update()
@@ -398,7 +407,6 @@ def finetune(cfg: FinetuneConfig) -> None:
                     break
 
             if gradient_step_idx == cfg.max_steps:
-                print("Yeah exiting")
                 break
 
 
