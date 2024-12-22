@@ -333,17 +333,28 @@ class DummyDataset(Dataset):
         return 10000
 
     def __getitem__(self, idx):
-        # TODO =>> Load image, action and instruction from disk -- we use dummy values
-        image = Image.fromarray(np.asarray(np.random.rand(224, 224, 3) * 255.0, dtype=np.uint8))
+        """Get a single training example."""
+        # Generate random image, action and instruction
+        image = Image.fromarray(
+            np.asarray(np.random.rand(224, 224, 3) * 255.0, dtype=np.uint8)
+        )
         action = np.asarray(np.random.rand(7), dtype=np.float32)
         instruction = "do something spectacular"
 
-        # Add instruction to VLA prompt
+        # Build conversation prompt
         prompt_builder = self.prompt_builder_fn("openvla")
         conversation = [
-            {"from": "human", "value": f"What action should the robot take to {instruction}?"},
-            {"from": "gpt", "value": self.action_tokenizer(action)},
+            {
+                "from": "human",
+                "value": f"What action should the robot take to {instruction}?"
+            },
+            {
+                "from": "gpt", 
+                "value": self.action_tokenizer(action)
+            }
         ]
+
+        # Add conversation turns to prompt builder
         for turn in conversation:
             prompt_builder.add_turn(turn["from"], turn["value"])
 
