@@ -207,12 +207,36 @@ def build_meta_files(out_root: Path, total_episodes: int, episode_lengths: List[
     meta_dir = out_root / "meta"
     meta_dir.mkdir(exist_ok=True)
 
+    # Read trajectory fps, average over all episodes
+    out_parquet_dir = out_root / "data" / "chunk-000"
+    parquet_files = os.listdir(out_parquet_dir)
+    parquet_files = [f for f in parquet_files if f.endswith(".parquet")]
+    parquet_file_fps = []
+    for parquetf in parquet_files:
+        df = pd.read_parquet(out_parquet_dir / parquetf)
+        inv_fps = df['timestamp'].diff().mean()
+        fps = 1.0 / inv_fps
+        parquet_file_fps.append(fps)
+        print(f"{fps=}")
+    mean_trajectory_fps = int(sum(parquet_file_fps) / len(parquet_file_fps))
+
+    # Get total number of video frames
+    video_dir = out_root / "videos" / "chunk-000" / "observation.images.side"
+    video_frame_counts = []
+    for episode_idx in range(total_episodes):
+        video_path = video_dir / f"episode_{episode_idx:06d}.mp4"
+        cap = cv2.VideoCapture(str(video_path))
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        video_frame_counts.append(frame_count)
+        cap.release()
+    total_video_frames = sum(video_frame_counts)
+
     # Read video metadata from first video file
     first_video = next((out_root / "videos" / "chunk-000" / "observation.images.side").glob("*.mp4"))
     cap = cv2.VideoCapture(str(first_video))
     
     # Get basic video properties
-    fps = cap.get(cv2.CAP_PROP_FPS)
+    video_fps = cap.get(cv2.CAP_PROP_FPS)
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     
@@ -231,12 +255,12 @@ def build_meta_files(out_root: Path, total_episodes: int, episode_lengths: List[
         "codebase_version": "v2.0",
         "robot_type": "UR5e",
         "total_episodes": total_episodes,
-        "total_frames": sum(episode_lengths),  # Total frames across all episodes
+        "total_frames": total_video_frames, 
         "total_tasks": 1,
         "total_videos": total_episodes,
         "total_chunks": 1,
         "chunks_size": total_episodes,
-        "fps": fps,
+        "fps": mean_trajectory_fps,
         "splits": {"train": f"0:{total_episodes}"},
         "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
         "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
@@ -246,7 +270,7 @@ def build_meta_files(out_root: Path, total_episodes: int, episode_lengths: List[
                 "shape": [height, width, channels],
                 "names": ["height", "width", "channel"],
                 "video_info": {
-                    "video.fps": fps,
+                    "video.fps": video_fps,
                     "video.codec": codec,
                     "pix_fmt": "yuv420p",  # This is still hardcoded as it's not easily accessible via OpenCV
                     "has_audio": False      # OpenCV doesn't expose audio info, but these are known to be video-only
@@ -278,11 +302,11 @@ def build_meta_files(out_root: Path, total_episodes: int, episode_lengths: List[
 
     # episodes.jsonl
     with open(meta_dir / "episodes.jsonl", "w") as f:
-        for eidx, length in enumerate(episode_lengths):
+        for eidx, frame_count in enumerate(video_frame_counts):
             row = {
                 "episode_index": eidx,
                 "tasks": ["Pick up the object"],
-                "length": length  # Store actual # frames
+                "length": frame_count
             }
             f.write(json.dumps(row) + "\n")
 
@@ -294,7 +318,7 @@ def build_meta_files(out_root: Path, total_episodes: int, episode_lengths: List[
         }
         f.write(json.dumps(row) + "\n")
 
-def main(raw_data_prefix: Path = None):
+def main(raw_data_prefix: Path = None, out_root: Path = None):
     print(f"\nStarting conversion with raw_data_prefix: {raw_data_prefix}")
     logging.debug("Starting the conversion process.")  # Logging line
     # Where is your raw data?
@@ -303,8 +327,10 @@ def main(raw_data_prefix: Path = None):
     raw_traj_dir = raw_data_prefix / "raw/trajectories" 
     raw_video_dir = raw_data_prefix / "raw/videos"
     print(f"Looking for data in:\n  {raw_traj_dir}\n  {raw_video_dir}")
+    
     # Where do you want the new dataset to live?
-    out_root = raw_data_prefix / "data/my_lerobot_dataset"
+    if out_root is None:
+        out_root = raw_data_prefix / "data/my_lerobot_dataset"
     data_out_dir = out_root / "data" / "chunk-000"
     data_out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -335,6 +361,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--raw_data_prefix", type=Path, default=None,
                        help="Path prefix to raw data directory")
+    parser.add_argument("--out_root", type=Path, default=None,
+                       help="Output directory for the dataset")
     args = parser.parse_args()
     print("Running with args:", args)
-    main(raw_data_prefix=args.raw_data_prefix)
+    main(raw_data_prefix=args.raw_data_prefix, out_root=args.out_root)
