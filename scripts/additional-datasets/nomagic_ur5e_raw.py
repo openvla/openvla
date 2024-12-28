@@ -41,6 +41,7 @@ Notes:
     ↔ "2024-12-19-12:37:26:897865_d5fb919d-2b3a-4d4b-b885-1f890a255b66.mp4"
 """
 
+import exiftool
 import os
 import re
 import json
@@ -52,8 +53,16 @@ import cv2
 
 from pathlib import Path
 from typing import List, Dict
+import torch
+import numpy as np
 from dataclasses import dataclass
 from scipy.spatial.transform import Rotation as R
+
+from datasets import Dataset
+from lerobot.common.datasets.utils import (
+    check_timestamps_sync,
+    calculate_episode_data_index
+)
 
 import logging
 
@@ -67,7 +76,7 @@ logging.basicConfig(
 )
 
 @dataclass
-class LeRobotFrame:
+class LeRobotTrajectoryStep:
     """
     Represents a single entry (frame) in the final LeRobot parquet data.
     For example:
@@ -87,20 +96,33 @@ class LeRobotFrame:
     frame_index: int
     action: List[float]
 
-def find_pairs(raw_traj_dir: Path, raw_video_dir: Path):
-    csv_files = sorted(raw_traj_dir.glob("*.csv"))
-    mp4_files = sorted(raw_video_dir.glob("*.mp4"))
 
-    logging.debug(f"Found CSV files: {[f.name for f in csv_files]}")
-    logging.debug(f"Found MP4 files: {[f.name for f in mp4_files]}")
+def pair_trajectories_and_videos(
+        csv_trajectories_dir: Path,  
+        mp4_videos_dir: Path  
+) -> list[tuple[Path, Path]]:
+    """
+    Pair up CSV trajectories and MP4 videos.
+    Uses alphanumeric order on filenames.
+    """ 
 
-    # Just pair them up in order since they're already sorted chronologically
-    pairs = list(zip(csv_files, mp4_files))
+    csv_trajectories = sorted(csv_trajectories_dir.glob("*.csv"))
+    mp4_videos = sorted(mp4_videos_dir.glob("*.mp4"))
+
+    logging.debug(f"Found CSV files: {[f.name for f in csv_trajectories]}")
+    logging.debug(f"Found MP4 files: {[f.name for f in mp4_videos]}")
+
+    # We pair them up in order since they're already sorted chronologically
+    # TODO: compare actual timestamps in filename, not alphanumeric order
+
+    # We pair them up alphanumerically
+    trajectory_video_pairs = list(zip(csv_trajectories, mp4_videos))
     
-    for csv_f, mp4_f in pairs:
-        logging.debug(f"Paired {csv_f.name} with {mp4_f.name}")
+    for csv_trajectory, mp4_video in trajectory_video_pairs:
+        logging.debug(f"Paired {csv_trajectory.name} with {mp4_video.name}")
 
-    return pairs
+
+    return trajectory_video_pairs
 
 def compute_actions_from_rows(rowA: pd.Series, rowB: pd.Series):
     """
@@ -137,88 +159,173 @@ def compute_actions_from_rows(rowA: pd.Series, rowB: pd.Series):
     
     return [dx, dy, dz, dox, doy, doz, grip_val]
 
-def convert_single_episode(
-    csv_file: Path,
-    mp4_file: Path,
+def get_frames(video_path: str) -> list:
+    vidcap = cv2.VideoCapture(video_path)
+    success, image = vidcap.read()
+    frames = []
+    while success:
+        frames.append(image)
+        success, image = vidcap.read()
+    return frames
+
+def make_video_timestamps(mp4_filepath: str, frames) -> list[int]:
+    with exiftool.ExifToolHelper() as et:
+        metadata = et.get_metadata(mp4_filepath)
+        video_timestamps = [int(i) for i in metadata[0]["XMP:Timestamps"]]
+        # ExifTool doesn't always return all frames, so we need to estimate
+        # TODO: can we just use cv2 to get fps and divide length by that?
+        avg_frame = \
+            int((video_timestamps[-1] - video_timestamps[0]) \
+            / (len(video_timestamps) - 1))
+        while len(video_timestamps) < len(frames):
+            video_timestamps.append(video_timestamps[-1] + avg_frame)
+    # Convert to Unix seconds
+    nanoseconds_to_miliseconds = 1_000_000
+    video_timestamps = [
+        int(i / nanoseconds_to_miliseconds)
+        for i in video_timestamps
+    ]
+    return video_timestamps
+
+def select_ts_closest_to_reference(
+    csv_trajectory_timestamps: pd.Series,
+    video_timestamps: list[int]
+) -> list[int]:
+    trajectory_timestamps = []
+    for video_ts in video_timestamps:
+        ts_not_in_csv_trajectory_range = (
+            video_ts < csv_trajectory_timestamps.min() or
+            video_ts > csv_trajectory_timestamps.max()
+        )
+        if ts_not_in_csv_trajectory_range:
+            continue
+        try:
+            closest_csv_trajectory_ts = csv_trajectory_timestamps.iloc[
+                csv_trajectory_timestamps.searchsorted(video_ts)
+            ]
+            trajectory_timestamps.append(closest_csv_trajectory_ts)
+        except IndexError:
+            continue
+    return trajectory_timestamps
+
+def csv_to_lerobot_trajectory(
+    csv_trajectory_filepath: Path,
+    mp4_filepath: Path,
     episode_index: int,
-    out_dir: Path
-) -> None:
+    time_delta: int = 50,
+) -> pa.Table:
     """
     Convert one CSV + MP4 into a single "episode_{:06d}.parquet" and
     copy the MP4 to "episode_{:06d}.mp4" in observation.images.side subdir.
     """
+
     # Load CSV data
-    df = pd.read_csv(csv_file)
-    # Convert timestamps to relative seconds from start of episode
-    df["Timestamp"] = pd.to_datetime(df["Timestamp"])
-    first_time = df["Timestamp"].iloc[0]
-    df["timestamp"] = (df["Timestamp"] - first_time).dt.total_seconds()
+    csv_trajectory_df = pd.read_csv(csv_trajectory_filepath)
 
-    # For convenience, define a small list of frames. We'll fill them up.
-    final_frames: List[LeRobotFrame] = []
+    # Get CSV trajectory timesteps in in Unix seconds
+    csv_trajectory_df["seconds"] = (
+        pd
+        .to_datetime(csv_trajectory_df["Timestamp"])
+        .add(pd.Timedelta(hours=-1))
+        .apply(lambda x: x.timestamp() * 1000)
+        .astype(int)
+    )
+    # Get video timestamps in Unix miliseconds
+    frames = get_frames(mp4_filepath)
+    video_timestamps = make_video_timestamps(mp4_filepath, frames)
 
-    for i in range(len(df) - 1):
-        rowA = df.iloc[i]
-        rowB = df.iloc[i + 1]
+
+    lerobot_trajectory: List[LeRobotTrajectoryStep] = []
+    for frame_idx, video_ts in enumerate(video_timestamps):
+        video_ts_not_in_csv_trajectory_range = (
+            video_ts < csv_trajectory_df["seconds"].min() or
+            video_ts > csv_trajectory_df["seconds"].max()
+        )
+        if video_ts_not_in_csv_trajectory_range:
+            continue
+        try:
+            rowA = csv_trajectory_df.iloc[
+                csv_trajectory_df["seconds"].searchsorted(video_ts)
+            ]
+            rowB = csv_trajectory_df.iloc[
+                csv_trajectory_df["seconds"].searchsorted(video_ts + time_delta)
+            ]
+        except IndexError:
+            continue
+
         # Build an action
         action_vals = compute_actions_from_rows(rowA, rowB)
         # Use the rowA's timestamp (relative seconds from start of episode)
-        ts_val = float(rowA["timestamp"])
+        # divide by 1000 to convert from miliseconds to seconds
+        ts_val = float(rowA["seconds"] - csv_trajectory_df["seconds"].min()) / 1000
         # next.done is usually False unless e.g. i == len(df) - 2
-        next_done = i == (len(df) - 2)
+        next_done = frame_idx == (len(video_timestamps) - 2)
+
         # Build the frame record
-        final_frames.append(
-            LeRobotFrame(
+        lerobot_trajectory.append(
+            LeRobotTrajectoryStep(
                 timestamp=ts_val,
                 episode_index=episode_index,
                 next_done=next_done,
                 task_index=0,
-                index=i,
-                frame_index=i,
+                index=frame_idx,
+                frame_index=frame_idx,
                 action=action_vals
             )
         )
 
     # Write out as a parquet file
-    out_parquet = out_dir / f"episode_{episode_index:06d}.parquet"
-    pa_frames = pa.Table.from_pydict({
-        "timestamp": [f.timestamp for f in final_frames],
-        "episode_index": [f.episode_index for f in final_frames],
-        "next.done": [f.next_done for f in final_frames],
-        "task_index": [f.task_index for f in final_frames],
-        "index": [f.index for f in final_frames],
-        "frame_index": [f.frame_index for f in final_frames],
-        "action": pa.array([f.action for f in final_frames], type=pa.list_(pa.float32()))
+    pa_trajectory = pa.Table.from_pydict({
+        "timestamp": [f.timestamp for f in lerobot_trajectory],
+        "episode_index": [f.episode_index for f in lerobot_trajectory],
+        "next.done": [f.next_done for f in lerobot_trajectory],
+        "task_index": [f.task_index for f in lerobot_trajectory],
+        "index": [f.index for f in lerobot_trajectory],
+        "frame_index": [f.frame_index for f in lerobot_trajectory],
+        "action": pa.array([f.action for f in lerobot_trajectory], type=pa.list_(pa.float32()))
     })
-    pq.write_table(pa_frames, out_parquet)
-    print(f"[Episode {episode_index}] Saved parquet =>  {out_parquet}")
+    return pa_trajectory
 
-    # Copy MP4 to the expected output location
-    video_outdir = out_dir.parent.parent \
+def save_single_trajectory(
+        trajectory: pa.Table,
+        out_dir: Path,
+        episode_index: int,
+) -> None:
+    """
+    Save a single trajectory to a parquet file at
+    out_dir / data / chunk-000 / f"episode_{episode_index:06d}.parquet"
+    """
+    trajectory_outdir = out_dir \
+        / "data" \
+        / "chunk-000" \
+        / f"episode_{episode_index:06d}.parquet"
+    pq.write_table(trajectory, trajectory_outdir)
+    logging.debug(
+        f"[Episode {episode_index}] Saved parquet =>  {trajectory_outdir}"
+    )
+
+def save_single_video(
+        video_path: Path,
+        out_dir: Path,
+        episode_index: int,
+) -> None:
+    """
+    Copy a single video to the expected output location at
+    out_dir / "videos" / "chunk-000" / "observation.images.side"
+    / f"episode_{episode_index:06d}.mp4"
+    """
+    video_outdir = out_dir \
         / "videos" \
         / "chunk-000" \
         / "observation.images.side"
     video_outdir.mkdir(parents=True, exist_ok=True)
     episode_mp4 = video_outdir / f"episode_{episode_index:06d}.mp4"
-    shutil.copy(mp4_file, episode_mp4)
-    print(f"[Episode {episode_index}] Saved MP4 => {episode_mp4}")
+    shutil.copy(video_path, episode_mp4)
+    logging.debug(f"[Episode {episode_index}] Saved MP4 => {episode_mp4}")
 
 def build_meta_files(out_root: Path, total_episodes: int, episode_lengths: List[int]):
     meta_dir = out_root / "meta"
     meta_dir.mkdir(exist_ok=True)
-
-    # Read trajectory fps, average over all episodes
-    out_parquet_dir = out_root / "data" / "chunk-000"
-    parquet_files = os.listdir(out_parquet_dir)
-    parquet_files = [f for f in parquet_files if f.endswith(".parquet")]
-    parquet_file_fps = []
-    for parquetf in parquet_files:
-        df = pd.read_parquet(out_parquet_dir / parquetf)
-        inv_fps = df['timestamp'].diff().mean()
-        fps = 1.0 / inv_fps
-        parquet_file_fps.append(fps)
-        print(f"{fps=}")
-    mean_trajectory_fps = int(sum(parquet_file_fps) / len(parquet_file_fps))
 
     # Get total number of video frames
     video_dir = out_root / "videos" / "chunk-000" / "observation.images.side"
@@ -248,6 +355,7 @@ def build_meta_files(out_root: Path, total_episodes: int, episode_lengths: List[
     fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
     codec = "".join([chr((fourcc >> 8 * i) & 0xFF) for i in range(4)])
     
+
     cap.release()
 
     # info.json
@@ -260,7 +368,7 @@ def build_meta_files(out_root: Path, total_episodes: int, episode_lengths: List[
         "total_videos": total_episodes,
         "total_chunks": 1,
         "chunks_size": total_episodes,
-        "fps": mean_trajectory_fps,
+        "fps": video_fps,
         "splits": {"train": f"0:{total_episodes}"},
         "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
         "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
@@ -291,10 +399,26 @@ def build_meta_files(out_root: Path, total_episodes: int, episode_lengths: List[
         json.dump(info_data, f, indent=2)
 
     # stats.json
+    # Collect all actions across episodes into a list
+    all_actions = []
+    for episode_idx in range(total_episodes):
+        episode_path = out_root \
+            / "data" \
+            / "chunk-000" \
+            / f"episode_{episode_idx:06d}.parquet"
+        table = pq.read_table(episode_path)
+        actions = table["action"].to_numpy()
+        all_actions.extend(actions)
+    
+    # Convert to numpy array and compute quantiles along first axis
+    all_actions = np.array(all_actions)
+    q01 = np.quantile(all_actions, 0.01, axis=0).tolist()
+    q99 = np.quantile(all_actions, 0.99, axis=0).tolist()
+    
     stats_data = {
         "action": {
-            "q01": [-0.03, -0.03, -0.03, -0.03, -0.03, -0.03, -1],
-            "q99": [0.03, 0.03, 0.03, 0.03, 0.03, 0.03,  1]
+            "q01": q01,
+            "q99": q99
         }
     }
     with open(meta_dir / "stats.json", "w") as f:
@@ -302,11 +426,11 @@ def build_meta_files(out_root: Path, total_episodes: int, episode_lengths: List[
 
     # episodes.jsonl
     with open(meta_dir / "episodes.jsonl", "w") as f:
-        for eidx, frame_count in enumerate(video_frame_counts):
+        for eidx, length in enumerate(episode_lengths):
             row = {
                 "episode_index": eidx,
                 "tasks": ["Pick up the object"],
-                "length": frame_count
+                "length": length
             }
             f.write(json.dumps(row) + "\n")
 
@@ -318,9 +442,12 @@ def build_meta_files(out_root: Path, total_episodes: int, episode_lengths: List[
         }
         f.write(json.dumps(row) + "\n")
 
-def main(raw_data_prefix: Path = None, out_root: Path = None):
-    print(f"\nStarting conversion with raw_data_prefix: {raw_data_prefix}")
-    logging.debug("Starting the conversion process.")  # Logging line
+def main(
+        raw_data_prefix: Path = None,
+        out_root: Path = None,
+        tolerance_s: float = 1e-5
+):
+    
     # Where is your raw data?
     if raw_data_prefix is None:
         raw_data_prefix = Path(".")
@@ -335,34 +462,96 @@ def main(raw_data_prefix: Path = None, out_root: Path = None):
     data_out_dir.mkdir(parents=True, exist_ok=True)
 
     # Pair up CSV + MP4
-    pairs = find_pairs(raw_traj_dir, raw_video_dir)
+    pairs = pair_trajectories_and_videos(raw_traj_dir, raw_video_dir)
 
     # Convert each episode
-    episode_lengths = []
+    lerobot_episode_lengths = []
+    lerobot_episode_index = 0
     for episode_index, (csv_f, mp4_f) in enumerate(pairs):
-        logging.debug(f"Processing episode {episode_index} with CSV: {csv_f.name} and MP4: {mp4_f.name}")
-        convert_single_episode(
-            csv_file=csv_f,
-            mp4_file=mp4_f,
+        logging.debug((
+            f"Processing episode {episode_index} "
+            f"with CSV: {csv_f.name} and MP4: {mp4_f.name}"
+        ))
+        lerobot_trajectory: pa.Table = csv_to_lerobot_trajectory(
+            csv_trajectory_filepath=csv_f,
+            mp4_filepath=mp4_f,
             episode_index=episode_index,
-            out_dir=data_out_dir
         )
-        # Append the length of each episode
-        episode_length = len(pd.read_csv(csv_f)) - 1  # Decrement by 1
-        episode_lengths.append(episode_length)
-        logging.debug(f"Episode {episode_index} length: {episode_length}")
+
+        # Check that the trajectory satisfies the tolerance.
+        timestamps = lerobot_trajectory["timestamp"].to_numpy()
+        diffs = np.diff(timestamps)
+        fps = cv2.VideoCapture(mp4_f).get(cv2.CAP_PROP_FPS)
+        within_tolerance = torch.tensor(
+            np.abs(diffs - 1/fps) <= tolerance_s
+        )
+        if not torch.all(within_tolerance):
+            # Find indices where tolerance check failed
+            failed_indices = torch.where(~within_tolerance)[0]
+            failed_diffs = diffs[failed_indices]
+            expected_interval = 1/fps
+            
+            logging.debug(
+                f"Episode {episode_index} failed tolerance check and will not be included in the LeRobot dataset.\n"
+                f"Found {len(failed_indices)} timestamp intervals outside tolerance of {tolerance_s}s:\n"
+                f"- Expected interval between frames: {expected_interval:.6f}s\n"
+                f"- Maximum deviation from expected: {np.max(np.abs(failed_diffs - expected_interval)):.6f}s\n"
+                f"- Maximum allowed deviation: ±{tolerance_s:.6f}s"
+            )
+            continue
+
+        # Save the trajectory and video
+        save_single_trajectory(
+            lerobot_trajectory,
+            out_root,
+            lerobot_episode_index
+        )
+        save_single_video(
+            mp4_f,
+            out_root,
+            lerobot_episode_index
+        )
+
+        # Save the length of the trajectory.
+        lerobot_episode_length = len(lerobot_trajectory) - 2
+        lerobot_episode_lengths.append(lerobot_episode_length)
+
+        logging.debug((
+            f"Episode {episode_index} "
+            f"will be saved in LeRobot dataset as episode {lerobot_episode_index} "
+            f"trajectory length: {lerobot_episode_length} "
+            f"number of frames: "
+            f"{cv2.VideoCapture(mp4_f).get(cv2.CAP_PROP_FRAME_COUNT)}"
+        ))
+
+        lerobot_episode_index += 1
+
+    lerobot_episodes_total = len(lerobot_episode_lengths)
 
     # Build meta files
-    build_meta_files(out_root=out_root, total_episodes=len(pairs), episode_lengths=episode_lengths)
+    build_meta_files(
+        out_root=out_root,
+        total_episodes=lerobot_episodes_total,
+        episode_lengths=lerobot_episode_lengths
+    )
     print("\nDone creating LeRobot-style dataset at:", out_root)
 
 if __name__ == "__main__":
+
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--raw_data_prefix", type=Path, default=None,
                        help="Path prefix to raw data directory")
     parser.add_argument("--out_root", type=Path, default=None,
                        help="Output directory for the dataset")
+    parser.add_argument("--tolerance_s", type=float, default=1e-5,
+                       help=("Maximum allowed deviation from expected "
+                             "frame interval (in seconds)"))
     args = parser.parse_args()
     print("Running with args:", args)
-    main(raw_data_prefix=args.raw_data_prefix, out_root=args.out_root)
+
+    main(
+        raw_data_prefix=args.raw_data_prefix,
+        out_root=args.out_root,
+        tolerance_s=args.tolerance_s
+    )
