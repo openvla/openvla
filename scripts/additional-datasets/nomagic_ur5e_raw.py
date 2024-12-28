@@ -513,7 +513,7 @@ def main(
         )
 
         # Save the length of the trajectory.
-        lerobot_episode_length = len(lerobot_trajectory) - 2
+        lerobot_episode_length = len(lerobot_trajectory)
         lerobot_episode_lengths.append(lerobot_episode_length)
 
         logging.debug((
