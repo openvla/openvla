@@ -187,36 +187,17 @@ def make_video_timestamps(mp4_filepath: str, frames) -> list[int]:
     ]
     return video_timestamps
 
-def select_ts_closest_to_reference(
-    csv_trajectory_timestamps: pd.Series,
-    video_timestamps: list[int]
-) -> list[int]:
-    trajectory_timestamps = []
-    for video_ts in video_timestamps:
-        ts_not_in_csv_trajectory_range = (
-            video_ts < csv_trajectory_timestamps.min() or
-            video_ts > csv_trajectory_timestamps.max()
-        )
-        if ts_not_in_csv_trajectory_range:
-            continue
-        try:
-            closest_csv_trajectory_ts = csv_trajectory_timestamps.iloc[
-                csv_trajectory_timestamps.searchsorted(video_ts)
-            ]
-            trajectory_timestamps.append(closest_csv_trajectory_ts)
-        except IndexError:
-            continue
-    return trajectory_timestamps
-
 def csv_to_lerobot_trajectory(
     csv_trajectory_filepath: Path,
     mp4_filepath: Path,
     episode_index: int,
     time_delta: int = 50,
-) -> pa.Table:
+) -> tuple[pa.Table, np.ndarray]:
     """
     Convert one CSV + MP4 into a single "episode_{:06d}.parquet" and
     copy the MP4 to "episode_{:06d}.mp4" in observation.images.side subdir.
+
+    Also save a video containing only those frames that were matched.
     """
 
     # Load CSV data
@@ -234,14 +215,15 @@ def csv_to_lerobot_trajectory(
     frames = get_frames(mp4_filepath)
     video_timestamps = make_video_timestamps(mp4_filepath, frames)
 
-
     lerobot_trajectory: List[LeRobotTrajectoryStep] = []
+    video_timestamp_is_matched = [None] * len(video_timestamps)
     for frame_idx, video_ts in enumerate(video_timestamps):
         video_ts_not_in_csv_trajectory_range = (
             video_ts < csv_trajectory_df["seconds"].min() or
             video_ts > csv_trajectory_df["seconds"].max()
         )
         if video_ts_not_in_csv_trajectory_range:
+            video_timestamp_is_matched[frame_idx] = False
             continue
         try:
             rowA = csv_trajectory_df.iloc[
@@ -251,7 +233,9 @@ def csv_to_lerobot_trajectory(
                 csv_trajectory_df["seconds"].searchsorted(video_ts + time_delta)
             ]
         except IndexError:
+            video_timestamp_is_matched[frame_idx] = False
             continue
+        video_timestamp_is_matched[frame_idx] = True
 
         # Build an action
         action_vals = compute_actions_from_rows(rowA, rowB)
@@ -273,6 +257,7 @@ def csv_to_lerobot_trajectory(
                 action=action_vals
             )
         )
+        video_timestamp_is_matched[frame_idx] = True
 
     # Write out as a parquet file
     pa_trajectory = pa.Table.from_pydict({
@@ -284,7 +269,15 @@ def csv_to_lerobot_trajectory(
         "frame_index": [f.frame_index for f in lerobot_trajectory],
         "action": pa.array([f.action for f in lerobot_trajectory], type=pa.list_(pa.float32()))
     })
-    return pa_trajectory
+    # Build a video containing only the matched frames
+    matched_frames = np.array([
+        frame 
+        for frame, is_matched in zip(frames, video_timestamp_is_matched)
+        if is_matched
+    ])
+    matched_video = matched_frames.astype(np.uint8)
+
+    return pa_trajectory, matched_video
 
 def save_single_trajectory(
         trajectory: pa.Table,
@@ -305,12 +298,13 @@ def save_single_trajectory(
     )
 
 def save_single_video(
-        video_path: Path,
+        video: np.ndarray,
         out_dir: Path,
         episode_index: int,
 ) -> None:
     """
-    Copy a single video to the expected output location at
+    Save a single video, given a numpy array of frames (dtype=uint8),
+    to the expected output location at
     out_dir / "videos" / "chunk-000" / "observation.images.side"
     / f"episode_{episode_index:06d}.mp4"
     """
@@ -320,7 +314,21 @@ def save_single_video(
         / "observation.images.side"
     video_outdir.mkdir(parents=True, exist_ok=True)
     episode_mp4 = video_outdir / f"episode_{episode_index:06d}.mp4"
-    shutil.copy(video_path, episode_mp4)
+
+    if len(video) == 0:
+        logging.debug(f"[Episode {episode_index}] No frames to save for MP4 => {episode_mp4}")
+        return
+
+    # Assume video shape is (num_frames, height, width, channels)
+    height, width, channels = video[0].shape
+    fps = 30.0  # or retrieve from context if available
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    writer = cv2.VideoWriter(str(episode_mp4), fourcc, fps, (width, height))
+
+    for frame in video:
+        writer.write(frame)
+
+    writer.release()
     logging.debug(f"[Episode {episode_index}] Saved MP4 => {episode_mp4}")
 
 def build_meta_files(out_root: Path, total_episodes: int, episode_lengths: List[int]):
@@ -472,7 +480,7 @@ def main(
             f"Processing episode {episode_index} "
             f"with CSV: {csv_f.name} and MP4: {mp4_f.name}"
         ))
-        lerobot_trajectory: pa.Table = csv_to_lerobot_trajectory(
+        lerobot_trajectory, matched_video = csv_to_lerobot_trajectory(
             csv_trajectory_filepath=csv_f,
             mp4_filepath=mp4_f,
             episode_index=episode_index,
@@ -507,7 +515,7 @@ def main(
             lerobot_episode_index
         )
         save_single_video(
-            mp4_f,
+            matched_video,
             out_root,
             lerobot_episode_index
         )
@@ -515,13 +523,18 @@ def main(
         # Save the length of the trajectory.
         lerobot_episode_length = len(lerobot_trajectory)
         lerobot_episode_lengths.append(lerobot_episode_length)
-
+        lerobot_frame_count = cv2.VideoCapture(  # Read it back from the saved video
+            out_root \
+            / "videos" \
+            / "chunk-000" \
+            / "observation.images.side" \
+            / f"episode_{lerobot_episode_index:06d}.mp4"
+        ).get(cv2.CAP_PROP_FRAME_COUNT)
         logging.debug((
             f"Episode {episode_index} "
             f"will be saved in LeRobot dataset as episode {lerobot_episode_index} "
             f"trajectory length: {lerobot_episode_length} "
-            f"number of frames: "
-            f"{cv2.VideoCapture(mp4_f).get(cv2.CAP_PROP_FRAME_COUNT)}"
+            f"number of frames: {int(lerobot_frame_count)}"
         ))
 
         lerobot_episode_index += 1
