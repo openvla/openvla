@@ -233,7 +233,10 @@ def csv_to_lerobot_trajectory(
                 csv_trajectory_df["seconds"].searchsorted(video_ts + time_delta)
             ]
         except IndexError:
-            video_timestamp_is_matched[frame_idx] = False
+            # TODO: this is false but we need the last timestep
+            # TODO: to match to some video closer than tolerance
+            # TODO: maybe we should mark (frame_idx + 1) as True instead?
+            video_timestamp_is_matched[frame_idx] = True
             continue
         video_timestamp_is_matched[frame_idx] = True
 
@@ -269,6 +272,7 @@ def csv_to_lerobot_trajectory(
         "frame_index": [f.frame_index for f in lerobot_trajectory],
         "action": pa.array([f.action for f in lerobot_trajectory], type=pa.list_(pa.float32()))
     })
+
     # Build a video containing only the matched frames
     matched_frames = np.array([
         frame 
@@ -301,6 +305,7 @@ def save_single_video(
         video: np.ndarray,
         out_dir: Path,
         episode_index: int,
+        fps: float,
 ) -> None:
     """
     Save a single video, given a numpy array of frames (dtype=uint8),
@@ -321,7 +326,6 @@ def save_single_video(
 
     # Assume video shape is (num_frames, height, width, channels)
     height, width, channels = video[0].shape
-    fps = 30.0  # or retrieve from context if available
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     writer = cv2.VideoWriter(str(episode_mp4), fourcc, fps, (width, height))
 
@@ -517,7 +521,8 @@ def main(
         save_single_video(
             matched_video,
             out_root,
-            lerobot_episode_index
+            lerobot_episode_index,
+            fps=cv2.VideoCapture(mp4_f).get(cv2.CAP_PROP_FPS)
         )
 
         # Save the length of the trajectory.
