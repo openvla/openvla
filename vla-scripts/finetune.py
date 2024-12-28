@@ -216,7 +216,6 @@ def finetune(cfg: FinetuneConfig) -> None:
             else VicunaV15ChatPromptBuilder
         ),
         root=f"{cfg.data_root_dir}/{cfg.dataset_name}",
-        tolerance_s=3.0,
         image_transforms=None,
         download_videos=False,
         local_files_only=True,
