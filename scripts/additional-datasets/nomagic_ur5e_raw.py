@@ -191,6 +191,7 @@ def csv_to_lerobot_trajectory(
     csv_trajectory_filepath: Path,
     mp4_filepath: Path,
     episode_index: int,
+    maybe_lerobot_episode_index: int,
     time_delta: int = 50,
 ) -> tuple[pa.Table, np.ndarray]:
     """
@@ -252,7 +253,7 @@ def csv_to_lerobot_trajectory(
         lerobot_trajectory.append(
             LeRobotTrajectoryStep(
                 timestamp=ts_val,
-                episode_index=episode_index,
+                episode_index=maybe_lerobot_episode_index,
                 next_done=next_done,
                 task_index=0,
                 index=frame_idx,
@@ -488,6 +489,7 @@ def main(
             csv_trajectory_filepath=csv_f,
             mp4_filepath=mp4_f,
             episode_index=episode_index,
+            maybe_lerobot_episode_index=lerobot_episode_index,
         )
 
         # Check that the trajectory satisfies the tolerance.
