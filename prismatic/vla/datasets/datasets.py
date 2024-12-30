@@ -227,8 +227,8 @@ class OpenVLALeRobotDataset(LeRobotDataset):
         self.dataset_statistics = {
             "openvla_lerobot_dataset": {
                 "action": {
-                    "q01": self.meta.stats["action"]["q01"].tolist(),
-                    "q99": self.meta.stats["action"]["q99"].tolist(),
+                    "q01": np.array(self.meta.stats["action"]["q01"]),
+                    "q99": np.array(self.meta.stats["action"]["q99"]),
                 }
             }
         }
@@ -248,7 +248,7 @@ class OpenVLALeRobotDataset(LeRobotDataset):
 
 
     def __len__(self):
-        return self.meta.info['total_episodes']
+        return self.num_frames
 
     # Retrieves a single (instruction, image, action) triple from the dataset.
     def __getitem__(self, idx):
@@ -270,6 +270,9 @@ class OpenVLALeRobotDataset(LeRobotDataset):
 
         # Retrieve action.
         action: torch.Tensor = hf_item["action"]
+        q01 = np.array(self.dataset_statistics["openvla_lerobot_dataset"]["action"]["q01"])
+        q99 = np.array(self.dataset_statistics["openvla_lerobot_dataset"]["action"]["q99"])
+        action = (2*action - q01 - q99) / (q99 - q01) # normalize to [-1, 1]
         action: str = self.action_tokenizer(action)
 
         # Add instruction to VLA prompt.
