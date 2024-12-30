@@ -111,7 +111,11 @@ class FinetuneConfig:
     wandb_entity: str = "stanford-voltron"  # Name of entity to log under
     run_id_note: Optional[str] = None  # Extra note for logging, Weights & Biases
 
+    # Parameter for LeRobotDataset
+    tolerance_s: float = 0.15
+
     # fmt: on
+
 
 
 @draccus.wrap()
@@ -216,6 +220,7 @@ def finetune(cfg: FinetuneConfig) -> None:
             else VicunaV15ChatPromptBuilder
         ),
         root=f"{cfg.data_root_dir}/{cfg.dataset_name}",
+        tolerance_s=cfg.tolerance_s,
         image_transforms=None,
         download_videos=False,
         local_files_only=True,
@@ -245,10 +250,13 @@ def finetune(cfg: FinetuneConfig) -> None:
     collator = PaddedCollatorForActionPrediction(
         processor.tokenizer.model_max_length, processor.tokenizer.pad_token_id, padding_side="right"
     )
+    sampler = RandomSampler(
+        vla_dataset, num_samples=vla_dataset.num_frames
+    )
     dataloader = DataLoader(
         vla_dataset,
         batch_size=cfg.batch_size,
-        sampler=RandomSampler(vla_dataset),
+        sampler=sampler,
         collate_fn=collator,
         num_workers=0,  # Set to 0 bc we don't use parallelism
                         # TODO: figure out if this is right?
@@ -327,6 +335,9 @@ def finetune(cfg: FinetuneConfig) -> None:
 
                 # Compute gradient step index
                 gradient_step_idx = batch_idx // cfg.grad_accumulation_steps
+                print(f"{batch_idx=}")
+                print(f"{cfg.grad_accumulation_steps=}")
+                print(f"{gradient_step_idx=}")
 
                 # Compute smoothened train metrics
                 #   =>> Equal to current step metrics when not using gradient accumulation
@@ -336,7 +347,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                 smoothened_l1_loss = sum(recent_l1_losses) / len(recent_l1_losses)
 
                 # Push Metrics to W&B (every 10 gradient steps)
-                if distributed_state.is_main_process and gradient_step_idx % 10 == 0:
+                if distributed_state.is_main_process and gradient_step_idx % 1 == 0:
                     print(
                         {
                             "train_loss": smoothened_loss,
