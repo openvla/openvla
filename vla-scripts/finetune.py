@@ -20,6 +20,7 @@ Run with:
 """
 
 import os
+import json
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -288,6 +289,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         min_epochs = (cfg.max_steps * cfg.grad_accumulation_steps) // steps_per_epoch + 1
         num_epochs = min_epochs
 
+        total_optimizer_steps = 0
         for _ in range(num_epochs):
             for batch_idx, batch in enumerate(dataloader):
                 with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -346,16 +348,6 @@ def finetune(cfg: FinetuneConfig) -> None:
                 smoothened_action_accuracy = sum(recent_action_accuracies) / len(recent_action_accuracies)
                 smoothened_l1_loss = sum(recent_l1_losses) / len(recent_l1_losses)
 
-                # Push Metrics to W&B (every 10 gradient steps)
-                if distributed_state.is_main_process and gradient_step_idx % 1 == 0:
-                    print(
-                        {
-                            "train_loss": smoothened_loss,
-                            "action_accuracy": smoothened_action_accuracy,
-                            "l1_loss": smoothened_l1_loss,
-                        },
-                    )
-
                 # Optimizer Step
                 if (
                     (batch_idx + 1) % cfg.grad_accumulation_steps == 0
@@ -364,9 +356,18 @@ def finetune(cfg: FinetuneConfig) -> None:
                     optimizer.step()
                     optimizer.zero_grad()
                     progress.update()
+                    total_optimizer_steps += 1
+                    print(
+                        {
+                            "total_optimizer_steps": total_optimizer_steps,
+                            "train_loss": smoothened_loss,
+                            "action_accuracy": smoothened_action_accuracy,
+                            "l1_loss": smoothened_l1_loss,
+                        },
+                    )
 
                 # Save Model Checkpoint =>> by default, only keeps the latest checkpoint, continually overwriting it!
-                if gradient_step_idx > 0 and gradient_step_idx % cfg.save_steps == 0:
+                if total_optimizer_steps > 0 and total_optimizer_steps % cfg.save_steps == 0:
                     if distributed_state.is_main_process:
                         print(f"Saving Model Checkpoint for Step {gradient_step_idx}")
 
@@ -396,11 +397,20 @@ def finetune(cfg: FinetuneConfig) -> None:
                                 print(f"Saved Model Checkpoint for Step {gradient_step_idx} at: {run_dir}")
                             else:
                                 # Prepare to save checkpoint in new directory
-                                checkpoint_dir = Path(str(run_dir) + f"--{gradient_step_idx}_chkpt")
+                                checkpoint_dir = Path(str(run_dir) + f"--{total_optimizer_steps}_chkpt")
                                 os.makedirs(checkpoint_dir, exist_ok=True)
 
                                 # Save dataset statistics to new directory
                                 save_dataset_statistics(vla_dataset.dataset_statistics, checkpoint_dir)
+
+                                # Save training statistics to new directory
+                                with open(checkpoint_dir / "training_stats.json", "w") as f:
+                                    json.dump({
+                                        "total_optimizer_steps": total_optimizer_steps,
+                                        "train_loss": smoothened_loss,
+                                        "action_accuracy": smoothened_action_accuracy,
+                                        "l1_loss": smoothened_l1_loss,
+                                    }, f, indent=4)
 
                                 # Save processor and model weights to new directory
                                 processor.save_pretrained(checkpoint_dir)
@@ -412,11 +422,11 @@ def finetune(cfg: FinetuneConfig) -> None:
                     dist.barrier()
 
                 # Stop training when max_steps is reached
-                if gradient_step_idx == cfg.max_steps:
+                if total_optimizer_steps == cfg.max_steps:
                     print(f"Max step {cfg.max_steps} reached! Stopping training...")
                     break
 
-            if gradient_step_idx == cfg.max_steps:
+            if total_optimizer_steps == cfg.max_steps:
                 break
 
 
