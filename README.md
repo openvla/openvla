@@ -136,6 +136,10 @@ pip install -e .
 pip install packaging ninja
 ninja --version; echo $?  # Verify Ninja --> should return exit code "0"
 pip install "flash-attn==2.5.5" --no-build-isolation
+
+#If you are using Nvidia H20, paste the following to the command line
+#pip install nvidia-cublas-cu12==12.4.5.8
+#There will be some warnings, but can work just fine.
 ```
 
 If you run into any problems during the installation process, please file a GitHub Issue.
