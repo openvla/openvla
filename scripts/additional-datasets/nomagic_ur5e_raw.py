@@ -50,6 +50,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import cv2
+from typing import Optional
 
 from pathlib import Path
 from typing import List, Dict
@@ -121,7 +122,6 @@ def pair_trajectories_and_videos(
     for csv_trajectory, mp4_video in trajectory_video_pairs:
         logging.debug(f"Paired {csv_trajectory.name} with {mp4_video.name}")
 
-
     return trajectory_video_pairs
 
 def compute_actions_from_rows(rowA: pd.Series, rowB: pd.Series):
@@ -140,59 +140,94 @@ def compute_actions_from_rows(rowA: pd.Series, rowB: pd.Series):
     q2 = [rowB["OrientationX"], rowB["OrientationY"],
           rowB["OrientationZ"], rowB["OrientationW"]]
     
-    # Calculate orientation difference using quaternion_difference logic
-    r1 = R.from_quat(q1)
-    r2 = R.from_quat(q2)
+    # Calculate orientation difference
+    r1 = R.from_rotvec(
+        [
+            rowA["OrientationX"],
+            rowA["OrientationY"],
+            rowA["OrientationZ"]
+        ]
+    )
+    r2 = R.from_rotvec(
+        [
+            rowB["OrientationX"],
+            rowB["OrientationY"],
+            rowB["OrientationZ"]
+        ]
+    )
     r_diff = r2 * r1.inv()
     euler_diff = r_diff.as_euler("xyz")
     dox, doy, doz = euler_diff
     
     # Gripper - map Gripper::Action values to float
-    grip_action_map = {
-        "Gripper::Action::NONE": 0.0,
-        "Gripper::Action::RELEASE": -1.0, 
-        "Gripper::Action::GRAB": 1.0
-    }
-    if rowA["GripperAction"] not in grip_action_map:
-        raise ValueError(f"Unknown gripper action: {rowA['GripperAction']}")
-    grip_val = grip_action_map[rowA["GripperAction"]]
+    grip_val = rowA["GripperAction"]
     
     return [dx, dy, dz, dox, doy, doz, grip_val]
 
-def get_frames(video_path: str) -> list:
-    vidcap = cv2.VideoCapture(video_path)
-    success, image = vidcap.read()
-    frames = []
-    while success:
-        frames.append(image)
-        success, image = vidcap.read()
-    return frames
+def read_frame_list_from_path(
+        video_path: Path | str
+) -> list[cv2.typing.MatLike]:
+    """
+    Given a path to an MP4 file, read all frames from the file into a list.
+    """
+    cap = cv2.VideoCapture(str(video_path))
+    frame_list = list()
+    while (ret := cap.read())[0]:  # ret[0] is success flag, ret[1] is the frame
+        frame_list.append(ret[1])
+    return frame_list
 
-def make_video_timestamps(mp4_filepath: str, frames) -> list[int]:
+def make_video_timestamps(
+        mp4_filepath: Path | str, 
+        frame_list: list[cv2.typing.MatLike],
+) -> list[int]:
+    """
+    Given a path to an MP4 file and a list of frames from that file,
+    use ExifTool to read a timestamp of as many frames as possible from the
+    video metadata, then interpolate evenly to remaining frames.
+    """
+    # Read timestamps from metadata. Result is given in Unix nanoseconds.
     with exiftool.ExifToolHelper() as et:
-        metadata = et.get_metadata(mp4_filepath)
-        video_timestamps = [int(i) for i in metadata[0]["XMP:Timestamps"]]
-        # ExifTool doesn't always return all frames, so we need to estimate
-        # TODO: can we just use cv2 to get fps and divide length by that?
-        avg_frame = \
-            int((video_timestamps[-1] - video_timestamps[0]) \
-            / (len(video_timestamps) - 1))
-        while len(video_timestamps) < len(frames):
-            video_timestamps.append(video_timestamps[-1] + avg_frame)
-    # Convert to Unix seconds
-    nanoseconds_to_miliseconds = 1_000_000
-    video_timestamps = [
-        int(i / nanoseconds_to_miliseconds)
-        for i in video_timestamps
+        mp4_metadata = et.get_metadata(str(mp4_filepath))
+        timestamp_list: list[int] = [
+            int(t)  # From str
+            for t in mp4_metadata[0]["XMP:Timestamps"]
+        ]
+    
+    # Emit a warning if not all frames are retrieved from the metadata.
+    if len(timestamp_list) < len(frame_list):
+        logging.warning(
+            f"ExifTool found {len(timestamp_list)} timestamps "
+            f"for {len(frame_list)} frames of video at {mp4_filepath}. "
+            "Will append interpolated timestamps to match frame count."    
+        )
+
+    # Interpolate timestamps.
+    fps = mp4_metadata[0]["QuickTime:VideoFrameRate"]
+    delta_t = int((1 / fps) * 1e9)  # In nanoseconds
+    while len(timestamp_list) < len(frame_list):
+        timestamp_list.append(timestamp_list[-1] + delta_t)
+
+    # Convert timestamps to Unix miliseconds.
+    timestamp_list = [
+        int(t / 1e6)  # In miliseconds
+        for t in timestamp_list
     ]
-    return video_timestamps
+
+    # Check max deviation of frame timestamp deltas from period.
+    timestamp_array = np.array(timestamp_list, dtype=np.float64) / 1e3
+    diffs = np.diff(timestamp_array)
+    logging.debug(
+        "Max deviation of frame timestamp deltas from period "
+        f"set by {fps=} is {np.max(np.abs(diffs - (1/fps))):.6f}s"
+    )
+
+    return timestamp_list
 
 def csv_to_lerobot_trajectory(
     csv_trajectory_filepath: Path,
     mp4_filepath: Path,
-    episode_index: int,
     maybe_lerobot_episode_index: int,
-    time_delta: int = 50,
+    tolerance_s: float = 1e-5,
 ) -> tuple[pa.Table, np.ndarray]:
     """
     Convert one CSV + MP4 into a single "episode_{:06d}.parquet" and
@@ -201,69 +236,125 @@ def csv_to_lerobot_trajectory(
     Also save a video containing only those frames that were matched.
     """
 
-    # Load CSV data
+    # Load CSV data.
     csv_trajectory_df = pd.read_csv(csv_trajectory_filepath)
 
-    # Get CSV trajectory timesteps in in Unix seconds
-    csv_trajectory_df["seconds"] = (
+    # --- Preprocess the trajectory data. ---
+    # Drop non-synchronized rows entirely. "Synchronized" is a boolean column
+    # intended to show if ViperLink was connected to UR5e at timestamp.
+    sync_mask = csv_trajectory_df["IsSynchronized"] == 1
+    csv_trajectory_df = csv_trajectory_df[sync_mask]
+
+    # Append binary grip action to each row.
+    # In ViperLink, `Gripper::Action::NONE` has the effect of taking previous
+    # action (or `RELEASE` at trajectory start). We preserve this behavior.
+    current_grip_action = -1.0  # Initial action is -1.0 (RELEASE)
+    for idx, row in csv_trajectory_df.iterrows():
+        if row["GripperAction"] == "Gripper::Action::RELEASE":
+            current_grip_action = -1.0
+        elif row["GripperAction"] == "Gripper::Action::GRAB":
+            current_grip_action = 1.0
+        csv_trajectory_df.at[idx, "GripperAction"] = current_grip_action
+        
+    # Append timestamp in Unix miliseconds to each CSV row.
+    csv_trajectory_df["miliseconds"] = (
         pd
         .to_datetime(csv_trajectory_df["Timestamp"])
-        .add(pd.Timedelta(hours=-1))
-        .apply(lambda x: x.timestamp() * 1000)
+        .add(pd.Timedelta(hours=-1))  # UTC-1
+        .apply(lambda x: x.timestamp() * 1e3)  # Miliseconds
         .astype(int)
     )
-    # Get video timestamps in Unix miliseconds
-    frames = get_frames(mp4_filepath)
-    video_timestamps = make_video_timestamps(mp4_filepath, frames)
 
-    lerobot_trajectory: List[LeRobotTrajectoryStep] = []
-    video_timestamp_is_matched = [None] * len(video_timestamps)
-    for frame_idx, video_ts in enumerate(video_timestamps):
-        video_ts_not_in_csv_trajectory_range = (
-            video_ts < csv_trajectory_df["seconds"].min() or
-            video_ts > csv_trajectory_df["seconds"].max()
-        )
-        if video_ts_not_in_csv_trajectory_range:
-            video_timestamp_is_matched[frame_idx] = False
-            continue
+    # --- Preprocess the video. ---
+    # Read video timestamp.
+    mp4_frame_list = read_frame_list_from_path(mp4_filepath)
+    mp4_timestamp_list: list[int] = make_video_timestamps(
+        mp4_filepath=mp4_filepath,  # Should be seconds
+        frame_list=mp4_frame_list
+    )
+
+    # --- Match trajectory steps to video frames. ---
+    row_ts_begin = csv_trajectory_df["miliseconds"].min()
+    row_ts_end = csv_trajectory_df["miliseconds"].max()
+    matched_rows_by_frame: list[Optional[pd.Series]] \
+         = [None] * len(mp4_timestamp_list)
+    tolerance_unix_ms = tolerance_s * 1e3
+    for frame_idx, frame_ts in enumerate(mp4_timestamp_list):
+        if (
+            frame_ts < row_ts_begin - tolerance_unix_ms or
+            frame_ts > row_ts_end + tolerance_unix_ms
+        ):
+            continue  # Unmatchable within tolerance
+
+        # Find a match by binary search on the trajectory timestamps.
         try:
-            rowA = csv_trajectory_df.iloc[
-                csv_trajectory_df["seconds"].searchsorted(video_ts)
+            matching_row = csv_trajectory_df.iloc[
+                csv_trajectory_df["miliseconds"].searchsorted(frame_ts)
             ]
-            rowB = csv_trajectory_df.iloc[
-                csv_trajectory_df["seconds"].searchsorted(video_ts + time_delta)
-            ]
-        except IndexError:
-            # TODO: this is false but we need the last timestep
-            # TODO: to match to some video closer than tolerance
-            # TODO: maybe we should mark (frame_idx + 1) as True instead?
-            video_timestamp_is_matched[frame_idx] = True
-            continue
-        video_timestamp_is_matched[frame_idx] = True
+        except IndexError:  # Likely means frame is outside trajectory,
+            continue        # but within tolerance. Ignore it for now.
 
-        # Build an action
-        action_vals = compute_actions_from_rows(rowA, rowB)
-        # Use the rowA's timestamp (relative seconds from start of episode)
-        # divide by 1000 to convert from miliseconds to seconds
-        ts_val = float(rowA["seconds"] - csv_trajectory_df["seconds"].min()) / 1000
-        # next.done is usually False unless e.g. i == len(df) - 2
-        next_done = frame_idx == (len(video_timestamps) - 2)
-
-        # Build the frame record
-        lerobot_trajectory.append(
-            LeRobotTrajectoryStep(
-                timestamp=ts_val,
-                episode_index=maybe_lerobot_episode_index,
-                next_done=next_done,
-                task_index=0,
-                index=frame_idx,
-                frame_index=frame_idx,
-                action=action_vals
+        # If the match is further than the tolerance, don't include it.
+        if (
+            frame_ts < matching_row["miliseconds"] - tolerance_unix_ms or
+            frame_ts > matching_row["miliseconds"] + tolerance_unix_ms
+        ):
+            logging.warning(
+                f"Matching candidate timestep further "
+                f"({np.abs(frame_ts - matching_row['miliseconds']):.8f}ms) from frame than "
+                f"allowed by tolerance of {tolerance_unix_ms}ms. Won't match this frame."
             )
-        )
-        video_timestamp_is_matched[frame_idx] = True
+            continue  # Unmatchable within tolerance
 
-    # Write out as a parquet file
+        # Save the match.
+        matched_rows_by_frame[frame_idx] = matching_row
+    
+    # Verify that matched rows form a single, continuous trajectory.
+    switch_count = int(matched_rows_by_frame[0] != None)
+    for row_idx, row in enumerate(matched_rows_by_frame[:-1]):
+        next_row = matched_rows_by_frame[row_idx + 1]
+        if type(row) != type(next_row):
+            switch_count += 1
+    if switch_count > 2:
+        raise ValueError(
+            "Trajectory data forms multiple trajectories when "
+            "matched against video."
+        )
+    
+    # --- Build the trajectory. ---
+    trajectory = [
+        (row_frame_pair_idx, row)
+        for row_frame_pair_idx, row
+        in enumerate(matched_rows_by_frame)
+        if row is not None  # If frame[frame_idx] matches some row
+    ]
+    # This is the timestamp of the initial frame in the trajectory.
+    # It is (brittly) guaranteed to be >=0, since we match steps to
+    # frames by binsearch on step timestamps, and skip index errors.
+    # Since the timestep of the first frame is zeroed out by LeRobotDataset
+    # initializer, we take it as the zero-point relative to step timestamps,
+    # i.e. saved timestamp is `timestamp_isn_unix_ms - trajectory_ts_begin`.
+    trajectory_init_frame_idx = trajectory[0][0]
+    trajectory_ts_begin = mp4_timestamp_list[trajectory_init_frame_idx]
+    lerobot_trajectory: List[LeRobotTrajectoryStep] = [
+        LeRobotTrajectoryStep(                                        
+            timestamp=float(row["miliseconds"] - trajectory_ts_begin) / 1e3, 
+            episode_index=maybe_lerobot_episode_index,                # ^ seconds
+            next_done=next_row is None or next_row_idx == len(trajectory) - 1,  # TODO: Not ideal
+            task_index=0,  # TODO: Assumes (incorrectly) only single task in data
+            index=step_idx,
+            frame_index=step_idx,
+            action=compute_actions_from_rows(row, next_row)
+        )
+        for step_idx, ((_, row), (next_row_idx, next_row))
+        in enumerate(zip(trajectory[:-1], trajectory[1:]))
+    ]
+    matched_video = np.array([
+        mp4_frame_list[frame_idx]
+        for frame_idx, _ in trajectory[:-1]
+    ], dtype=np.uint8)
+
+    # Write trajectory out as a parquet.
     pa_trajectory = pa.Table.from_pydict({
         "timestamp": [f.timestamp for f in lerobot_trajectory],
         "episode_index": [f.episode_index for f in lerobot_trajectory],
@@ -273,14 +364,6 @@ def csv_to_lerobot_trajectory(
         "frame_index": [f.frame_index for f in lerobot_trajectory],
         "action": pa.array([f.action for f in lerobot_trajectory], type=pa.list_(pa.float32()))
     })
-
-    # Build a video containing only the matched frames
-    matched_frames = np.array([
-        frame 
-        for frame, is_matched in zip(frames, video_timestamp_is_matched)
-        if is_matched
-    ])
-    matched_video = matched_frames.astype(np.uint8)
 
     return pa_trajectory, matched_video
 
@@ -307,7 +390,7 @@ def save_single_video(
         out_dir: Path,
         episode_index: int,
         fps: float,
-) -> None:
+) -> Path:
     """
     Save a single video, given a numpy array of frames (dtype=uint8),
     to the expected output location at
@@ -335,6 +418,7 @@ def save_single_video(
 
     writer.release()
     logging.debug(f"[Episode {episode_index}] Saved MP4 => {episode_mp4}")
+    return episode_mp4
 
 def build_meta_files(out_root: Path, total_episodes: int, episode_lengths: List[int]):
     meta_dir = out_root / "meta"
@@ -464,23 +548,36 @@ def main(
     # Where is your raw data?
     if raw_data_prefix is None:
         raw_data_prefix = Path(".")
-    raw_traj_dir = raw_data_prefix / "raw/trajectories" 
-    raw_video_dir = raw_data_prefix / "raw/videos"
-    print(f"Looking for data in:\n  {raw_traj_dir}\n  {raw_video_dir}")
+    raw_traj_dir = raw_data_prefix / "trajectories" 
+    print(f"Looking for data in:\n  {raw_traj_dir}")
     
     # Where do you want the new dataset to live?
     if out_root is None:
-        out_root = raw_data_prefix / "data/my_lerobot_dataset"
+        raise ValueError("give a outfile location")
     data_out_dir = out_root / "data" / "chunk-000"
     data_out_dir.mkdir(parents=True, exist_ok=True)
 
     # Pair up CSV + MP4
-    pairs = pair_trajectories_and_videos(raw_traj_dir, raw_video_dir)
+    pairs: list[tuple[Path, Path]] = []
+    for ep_idx in os.listdir(raw_traj_dir):
+        ep_files = os.listdir(raw_traj_dir / ep_idx)
+        csv_file = [
+            ep_file 
+            for ep_file in ep_files
+            if ep_file.endswith(".csv")
+        ][0]
+        mp4_file = [
+            ep_file 
+            for ep_file in ep_files
+            if ("side_view" in ep_file) and ep_file.endswith(".mp4")
+        ][0]
+        pairs.append((raw_traj_dir / ep_idx / csv_file, raw_traj_dir / ep_idx / mp4_file))
 
     # Convert each episode
     lerobot_episode_lengths = []
     lerobot_episode_index = 0
     for episode_index, (csv_f, mp4_f) in enumerate(pairs):
+        print("\n")
         logging.debug((
             f"Processing episode {episode_index} "
             f"with CSV: {csv_f.name} and MP4: {mp4_f.name}"
@@ -488,8 +585,8 @@ def main(
         lerobot_trajectory, matched_video = csv_to_lerobot_trajectory(
             csv_trajectory_filepath=csv_f,
             mp4_filepath=mp4_f,
-            episode_index=episode_index,
             maybe_lerobot_episode_index=lerobot_episode_index,
+            tolerance_s=tolerance_s,
         )
 
         # Check that the trajectory satisfies the tolerance.
@@ -509,6 +606,7 @@ def main(
                 f"Episode {episode_index} failed tolerance check and will not be included in the LeRobot dataset.\n"
                 f"Found {len(failed_indices)} timestamp intervals outside tolerance of {tolerance_s}s:\n"
                 f"- Expected interval between frames: {expected_interval:.6f}s\n"
+                f"- Number of failed indices: {failed_indices.shape[0]}\n"
                 f"- Maximum deviation from expected: {np.max(np.abs(failed_diffs - expected_interval)):.6f}s\n"
                 f"- Maximum allowed deviation: ±{tolerance_s:.6f}s"
             )
@@ -520,7 +618,7 @@ def main(
             out_root,
             lerobot_episode_index
         )
-        save_single_video(
+        video_path = save_single_video(
             matched_video,
             out_root,
             lerobot_episode_index,
@@ -530,16 +628,10 @@ def main(
         # Save the length of the trajectory.
         lerobot_episode_length = len(lerobot_trajectory)
         lerobot_episode_lengths.append(lerobot_episode_length)
-        lerobot_frame_count = cv2.VideoCapture(  # Read it back from the saved video
-            out_root \
-            / "videos" \
-            / "chunk-000" \
-            / "observation.images.side" \
-            / f"episode_{lerobot_episode_index:06d}.mp4"
-        ).get(cv2.CAP_PROP_FRAME_COUNT)
+        lerobot_frame_count = cv2.VideoCapture(video_path).get(cv2.CAP_PROP_FRAME_COUNT)
         logging.debug((
             f"Episode {episode_index} "
-            f"will be saved in LeRobot dataset as episode {lerobot_episode_index} "
+            f"will be saved in LeRobot dataset as episode {lerobot_episode_index}.\n "
             f"trajectory length: {lerobot_episode_length} "
             f"number of frames: {int(lerobot_frame_count)}"
         ))
