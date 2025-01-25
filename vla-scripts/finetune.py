@@ -318,7 +318,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                 progress.update()
 
             # Save Model Checkpoint =>> by default, only keeps the latest checkpoint, continually overwriting it!
-            if gradient_step_idx > 0 and gradient_step_idx % cfg.save_steps == 0:
+            if gradient_step_idx > 0 and gradient_step_idx % cfg.save_steps == 0 and batch_idx % cfg.grad_accumulation_steps == 0:
                 if distributed_state.is_main_process:
                     print(f"Saving Model Checkpoint for Step {gradient_step_idx}")
 
