@@ -270,7 +270,15 @@ def finetune(cfg: FinetuneConfig) -> None:
     # Deque to store recent train metrics (used for computing smoothened metrics for gradient accumulation)
     recent_losses = deque(maxlen=cfg.grad_accumulation_steps)
     recent_action_accuracies = deque(maxlen=cfg.grad_accumulation_steps)
+    recent_action_accuracies_components = {
+        action_dim_name: deque(maxlen=cfg.grad_accumulation_steps)
+        for action_dim_name in ['dx', 'dy', 'dz', 'dox', 'doy', 'doz', 'grip']
+    }
     recent_l1_losses = deque(maxlen=cfg.grad_accumulation_steps)
+    recent_l1_loss_components = {
+        action_dim_name: deque(maxlen=cfg.grad_accumulation_steps)
+        for action_dim_name in ['dx', 'dy', 'dz', 'dox', 'doy', 'doz', 'grip']
+    }
 
     # Calculate number of epochs
     steps_per_epoch = len(dataloader)  # number of batches per epoch
@@ -320,8 +328,18 @@ def finetune(cfg: FinetuneConfig) -> None:
                 # Compute Accuracy
                 correct_preds = (action_preds == action_gt) & mask
                 action_accuracy = correct_preds.sum().float() / mask.sum().float()
+                action_accuracy_components = {
+                    action_dim_name: (
+                        (
+                            (action_preds[:, i::7] == action_gt[:, i::7]) & mask[:, i::7]
+                        ).sum().float() 
+                        / mask[:, i::7].sum().float()
+                    )
+                    for i, action_dim_name in enumerate(['dx', 'dy', 'dz', 'dox', 'doy', 'doz', 'grip'])
+                }
 
                 # Compute L1 Loss on Predicted (Continuous) Actions
+
                 continuous_actions_pred = torch.tensor(
                     action_tokenizer.decode_token_ids_to_actions(action_preds[mask].cpu().numpy())
                 )
@@ -329,24 +347,45 @@ def finetune(cfg: FinetuneConfig) -> None:
                     action_tokenizer.decode_token_ids_to_actions(action_gt[mask].cpu().numpy())
                 )
                 action_l1_loss = torch.nn.functional.l1_loss(continuous_actions_pred, continuous_actions_gt)
+                action_l1_loss_components = {
+                    action_dim_name: torch.nn.functional.l1_loss(
+                        continuous_actions_pred[i::7],
+                        continuous_actions_gt[i::7]
+                    )
+                    for i, action_dim_name in enumerate(['dx', 'dy', 'dz', 'dox', 'doy', 'doz', 'grip'])
+                }
 
                 # Store recent train metrics
                 recent_losses.append(loss.item())
                 recent_action_accuracies.append(action_accuracy.item())
+                for action_dim_name in ['dx', 'dy', 'dz', 'dox', 'doy', 'doz', 'grip']:
+                    recent_action_accuracies_components[action_dim_name].append(action_accuracy_components[action_dim_name].item())
                 recent_l1_losses.append(action_l1_loss.item())
+                for action_dim_name in ['dx', 'dy', 'dz', 'dox', 'doy', 'doz', 'grip']:
+                    recent_l1_loss_components[action_dim_name].append(action_l1_loss_components[action_dim_name].item())
 
                 # Compute gradient step index
                 gradient_step_idx = batch_idx // cfg.grad_accumulation_steps
-                print(f"{batch_idx=}")
-                print(f"{cfg.grad_accumulation_steps=}")
-                print(f"{gradient_step_idx=}")
+                wandb.log({
+                    "batch_idx": batch_idx,
+                    "grad_accumulation_steps": cfg.grad_accumulation_steps,
+                    "gradient_step_idx": gradient_step_idx
+                })
 
                 # Compute smoothened train metrics
                 #   =>> Equal to current step metrics when not using gradient accumulation
                 #   =>> Otherwise, equal to the average of metrics observed over micro-batches used for gradient accumulation
                 smoothened_loss = sum(recent_losses) / len(recent_losses)
                 smoothened_action_accuracy = sum(recent_action_accuracies) / len(recent_action_accuracies)
+                smoothened_action_accuracy_components = {
+                    action_dim_name: sum(recent_action_accuracies_components[action_dim_name]) / len(recent_action_accuracies_components[action_dim_name])
+                    for action_dim_name in ['dx', 'dy', 'dz', 'dox', 'doy', 'doz', 'grip']
+                }
                 smoothened_l1_loss = sum(recent_l1_losses) / len(recent_l1_losses)
+                smoothened_l1_loss_components = {
+                    action_dim_name: sum(recent_l1_loss_components[action_dim_name]) / len(recent_l1_loss_components[action_dim_name])
+                    for action_dim_name in ['dx', 'dy', 'dz', 'dox', 'doy', 'doz', 'grip']
+                }
 
                 # Optimizer Step
                 if (
@@ -357,14 +396,38 @@ def finetune(cfg: FinetuneConfig) -> None:
                     optimizer.zero_grad()
                     progress.update()
                     total_optimizer_steps += 1
-                    print(
-                        {
-                            "total_optimizer_steps": total_optimizer_steps,
-                            "train_loss": smoothened_loss,
-                            "action_accuracy": smoothened_action_accuracy,
-                            "l1_loss": smoothened_l1_loss,
+                    # Convert recent actions to tensors for logging, split by action dimension
+                    action_pred_by_dim = {
+                        action_dim_name: continuous_actions_pred[i::7].detach().cpu()
+                        for i, action_dim_name in enumerate(['dx', 'dy', 'dz', 'dox', 'doy', 'doz', 'grip'])
+                    }
+                    action_gt_by_dim = {
+                        action_dim_name: continuous_actions_gt[i::7].detach().cpu()
+                        for i, action_dim_name in enumerate(['dx', 'dy', 'dz', 'dox', 'doy', 'doz', 'grip'])
+                    }
+                    
+                    wandb.log({
+                        "total_optimizer_steps": total_optimizer_steps,
+                        "train_loss": smoothened_loss,
+                        "action_accuracy": smoothened_action_accuracy,
+                        "l1_loss": smoothened_l1_loss,
+                        **{
+                            f"l1_loss_{action_dim_name}": smoothened_l1_loss_components[action_dim_name]
+                            for action_dim_name in ['dx', 'dy', 'dz', 'dox', 'doy', 'doz', 'grip']
                         },
-                    )
+                        **{
+                            f"action_accuracy_{action_dim_name}": smoothened_action_accuracy_components[action_dim_name]
+                            for action_dim_name in ['dx', 'dy', 'dz', 'dox', 'doy', 'doz', 'grip']
+                        },
+                        **{
+                            f"recent_actions_pred_{action_dim_name}": wandb.Histogram(action_pred_by_dim[action_dim_name].numpy())
+                            for action_dim_name in ['dx', 'dy', 'dz', 'dox', 'doy', 'doz', 'grip']
+                        },
+                        **{
+                            f"recent_actions_gt_{action_dim_name}": wandb.Histogram(action_gt_by_dim[action_dim_name].numpy())
+                            for action_dim_name in ['dx', 'dy', 'dz', 'dox', 'doy', 'doz', 'grip']
+                        }
+                    })
 
                 # Save Model Checkpoint =>> by default, only keeps the latest checkpoint, continually overwriting it!
                 if total_optimizer_steps > 0 and total_optimizer_steps % cfg.save_steps == 0:
@@ -372,10 +435,10 @@ def finetune(cfg: FinetuneConfig) -> None:
                         print(f"Saving Model Checkpoint for Step {gradient_step_idx}")
 
                         # If LoRA, we first save adapter weights, then merge into full model; otherwise, default save!
-                        save_dir = adapter_dir if cfg.use_lora else run_dir
+                        save_dir = f"{adapter_dir}-{total_optimizer_steps}_chkpt" if cfg.use_lora else run_dir
 
                         # Save Processor & Weights
-                        processor.save_pretrained(run_dir)
+                        processor.save_pretrained(f"run_dir--{total_optimizer_steps}_chkpt")
                         vla.module.save_pretrained(save_dir)
 
                     # Wait for processor and adapter weights to be saved by main process
@@ -384,6 +447,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                     # Merge LoRA weights into model backbone for faster inference
                     #   =>> Note that merging is slow and can be done post-hoc to speed up training
                     if cfg.use_lora:
+                        continue
                         base_vla = AutoModelForVision2Seq.from_pretrained(
                             cfg.vla_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, trust_remote_code=True
                         )
@@ -392,7 +456,11 @@ def finetune(cfg: FinetuneConfig) -> None:
                         if distributed_state.is_main_process:
                             if cfg.save_latest_checkpoint_only:
                                 # Overwrite latest checkpoint
-                                merged_vla.save_pretrained(run_dir)
+                                # Save locally
+                                # merged_vla.save_pretrained(run_dir)
+
+                                # NOTE: don't save, we'll merge later
+                                continue
 
                                 print(f"Saved Model Checkpoint for Step {gradient_step_idx} at: {run_dir}")
                             else:
