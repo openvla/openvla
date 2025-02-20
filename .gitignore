@@ -153,3 +153,4 @@ rollouts/
 wandb/
 .tmp
 .runs
+.preprocessors

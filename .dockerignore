@@ -1,0 +1,13 @@
+# Prevent these from being sent to Docker daemon
+.git/
+.venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+.env
+data/
+.runs/
+.adapter/
+*.swp
+*.swo
+*.log 
