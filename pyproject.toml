@@ -12,7 +12,7 @@ authors = [
 description = "OpenVLA: Vision-Language-Action Models for Robotics"
 version = "0.0.3"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 keywords = ["vision-language-actions models", "multimodal pretraining", "robot learning"]
 license = {file = "LICENSE"}
 classifiers = [
@@ -31,27 +31,27 @@ classifiers = [
 ]
 dependencies = [
     "accelerate>=0.25.0",
-    "draccus==0.8.0",
+    "draccus>=0.8.0",
     "einops",
     # "flash_attn==2.5.5",      # Here for documentation -- install *AFTER* editable install (follow README)
     "huggingface_hub",
     "json-numpy",
     "jsonlines",
     "matplotlib",
-    "peft==0.11.1",
+    "peft>=0.11.1",
     "protobuf",
     "rich",
-    "sentencepiece==0.1.99",
-    "timm==0.9.10",
-    "tokenizers==0.19.1",
-    "torch==2.2.0",
-    "torchvision==0.17.0",
-    "torchaudio==2.2.0",
-    "transformers==4.40.1",
+    "sentencepiece>=0.1.99",
+    "timm>=0.9.10",
+    "tokenizers>=0.19.1",
+    "torch>=2.2.0",
+    "torchvision>=0.17.0",
+    "torchaudio>=2.2.0",
+    "transformers>=4.40.1",
     "wandb",
-    "tensorflow==2.15.0",
-    "tensorflow_datasets==4.9.3",
-    "tensorflow_graphics==2021.12.3",
+    "tensorflow>=2.15.0",
+    "tensorflow_datasets>=4.9.3",
+    "tensorflow_graphics>=2021.12.3",
     "dlimp @ git+https://github.com/moojink/dlimp_openvla"
 ]
 
@@ -87,7 +87,7 @@ preview = true
 
 [tool.ruff]
 line-length = 121
-target-version = "py38"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["A", "B", "E", "F", "I", "RUF", "W"]
