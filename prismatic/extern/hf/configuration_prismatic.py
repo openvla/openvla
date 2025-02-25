@@ -138,3 +138,24 @@ class OpenVLAConfig(PrismaticConfig):
         self.norm_stats, self.n_action_bins = norm_stats, n_action_bins
 
         super().__init__(**kwargs)
+
+
+class MoEOpenVLAConfig(OpenVLAConfig):
+    model_type: str = "moe_openvla"
+
+    def __init__(
+        self,
+        norm_stats: Optional[Dict[str, Dict[str, Dict[str, Dict[str, List[float]]]]]] = None,
+        n_action_bins: int = 256,
+        num_experts: int = 4,
+        num_selected_experts: int = 2,
+        expert_dropout: float = 0.1,
+        load_balancing_loss_weight: float = 0.01,
+        **kwargs: str,
+    ) -> None:
+        self.num_experts = num_experts
+        self.num_selected_experts = num_selected_experts
+        self.expert_dropout = expert_dropout
+        self.load_balancing_loss_weight = load_balancing_loss_weight
+        
+        super().__init__(norm_stats=norm_stats, n_action_bins=n_action_bins, **kwargs)

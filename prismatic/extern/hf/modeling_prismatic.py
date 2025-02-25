@@ -27,7 +27,8 @@ from timm.models.vision_transformer import LayerScale
 from transformers import AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
 from transformers.modeling_outputs import ModelOutput
 
-from .configuration_prismatic import OpenVLAConfig, PrismaticConfig
+from .configuration_prismatic import OpenVLAConfig, PrismaticConfig, MoEOpenVLAConfig
+from .layers.moe import ActionMoELayer
 
 # Get Logger
 logger = logging.getLogger(__name__)
@@ -560,3 +561,135 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         """Get all the logged statistics for the given dataset."""
         unnorm_key = self._check_unnorm_key(self.norm_stats, unnorm_key)
         return self.norm_stats[unnorm_key]["action"]
+
+
+class MoEOpenVLAForActionPrediction(OpenVLAForActionPrediction):
+    config_class = MoEOpenVLAConfig
+    
+    def __init__(self, config: MoEOpenVLAConfig) -> None:
+        super().__init__(config)
+        
+        # Create MoE layer for action prediction
+        self.action_moe = ActionMoELayer(
+            hidden_size=self.config.text_config.hidden_size,
+            vocab_size=self.vocab_size,  # Original vocab size
+            num_experts=self.config.num_experts,
+            num_selected_experts=self.config.num_selected_experts,
+            expert_dropout=self.config.expert_dropout
+        )
+        
+        # Initialize from the model's lm_head if possible
+        if hasattr(self.model, 'lm_head'):
+            self.action_moe.from_pretrained_layers(self.model.lm_head)
+        
+        # Save the original lm_head for non-action generation
+        self.original_lm_head = self.model.lm_head if hasattr(self.model, 'lm_head') else None
+        
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        **kwargs
+    ):
+        # Forward pass through base model to get hidden states
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=True,  # Always need hidden states for MoE
+            return_dict=True,
+            **kwargs
+        )
+        
+        hidden_states = outputs.hidden_states[-1]  # Use final hidden states
+        
+        # Determine if this is an action prediction pass
+        is_action_prediction = self._is_action_prediction(input_ids)
+        
+        if is_action_prediction:
+            # Use MoE for action prediction
+            logits, aux_loss = self.action_moe(hidden_states)
+        else:
+            # Use original LM head for regular text generation
+            logits = self.original_lm_head(hidden_states)
+            aux_loss = {"load_balancing_loss": torch.tensor(0.0, device=hidden_states.device)}
+        
+        loss = None
+        if labels is not None:
+            # Shift so that tokens < n predict n
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            # Flatten the tokens
+            loss_fct = nn.CrossEntropyLoss()
+            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            
+            # Add auxiliary loss with configured weight
+            if is_action_prediction:
+                loss = loss + self.config.load_balancing_loss_weight * aux_loss["load_balancing_loss"]
+        
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+    
+    def _is_action_prediction(self, input_ids: Optional[torch.LongTensor]) -> bool:
+        """Determine if this is an action prediction prompt based on special tokens/patterns"""
+        if input_ids is None:
+            return False
+            
+        # Check for pattern indicating action prediction
+        # This is a simplified example - you'll need to adapt based on your prompt structure
+        # Typically you'd check for tokens like "OUT:" or empty token (29871) for action prediction
+        
+        # Example: check if the last token is the empty token (29871)
+        # which often precedes action token generation
+        if torch.any(input_ids[:, -1] == 29871):
+            return True
+            
+        return False
+    
+    def predict_action(
+        self, input_ids: Optional[torch.LongTensor] = None, unnorm_key: Optional[str] = None, **kwargs
+    ) -> np.ndarray:
+        """
+        Predict action using MoE-enhanced generation
+        
+        This maintains full compatibility with the original OpenVLA predict_action method
+        while using the MoE routing internally.
+        """
+        # If the special empty token does not already appear after the colon, insert it
+        if not torch.all(input_ids[:, -1] == 29871):
+            input_ids = torch.cat(
+                (input_ids, torch.unsqueeze(torch.Tensor([29871]).long(), dim=0).to(input_ids.device)), dim=1
+            )
+
+        # Run VLA inference using MoE-enhanced forward pass
+        generated_ids = self.generate(input_ids, max_new_tokens=self.get_action_dim(unnorm_key), **kwargs)
+
+        # Extract predicted action tokens and translate into continuous actions
+        predicted_action_token_ids = generated_ids[0, -self.get_action_dim(unnorm_key):].cpu().numpy()
+        discretized_actions = self.vocab_size - predicted_action_token_ids
+        discretized_actions = np.clip(discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1)
+        normalized_actions = self.bin_centers[discretized_actions]
+
+        # Unnormalize actions using dataset statistics
+        if unnorm_key is not None:
+            action_norm_stats = self.get_action_stats(unnorm_key)
+            return normalized_actions * action_norm_stats["scale"] + action_norm_stats["mean"]
+        
+        return normalized_actions
