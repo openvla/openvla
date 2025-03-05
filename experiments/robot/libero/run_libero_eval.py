@@ -29,6 +29,7 @@ import tqdm
 from libero.libero import benchmark
 
 import wandb
+import torch
 
 # Append current directory so that interpreter can find experiments.robot
 sys.path.append("../..")
@@ -84,11 +85,22 @@ class GenerateConfig:
 
     seed: int = 7                                    # Random Seed (for reproducibility)
 
+    # CUDA DEVICE specification
+    cuda_visible_devices: Optional[str] = None
     # fmt: on
 
 
 @draccus.wrap()
 def eval_libero(cfg: GenerateConfig) -> None:
+    # Set CUDA_VISIBLE_DEVICES
+    if cfg.cuda_visible_devices is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = cfg.cuda_visible_devices
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Using device: {device}")
+        print(f"CUDA_VISIBLE_DEVICES: {os.environ['CUDA_VISIBLE_DEVICES']}")
+        print('Count of using GPUs:', torch.cuda.device_count())
+        print('Current cuda device:', torch.cuda.current_device())
+        
     assert cfg.pretrained_checkpoint is not None, "cfg.pretrained_checkpoint must not be None!"
     if "image_aug" in cfg.pretrained_checkpoint:
         assert cfg.center_crop, "Expecting `center_crop==True` because model was trained with image augmentations!"
