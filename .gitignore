@@ -151,3 +151,6 @@ data/
 # Rollout videos and wandb logs
 rollouts/
 wandb/
+.tmp
+.runs
+.preprocessors

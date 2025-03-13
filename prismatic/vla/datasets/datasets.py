@@ -176,6 +176,139 @@ class EpisodicRLDSDataset(RLDSDataset):
             ]
             yield out
 
+###
+from typing import Callable
+
+from lerobot.common.datasets.lerobot_dataset import (
+    LeRobotDataset,
+    LeRobotDatasetMetadata,
+)
+
+# TODO: zrob dataset ktory by jednoczesnie byl LeRobotDatasetem i implementoeal to czego tam potrzebuje openvla -- te prompt buildery, itp.
+
+class OpenVLALeRobotDataset(LeRobotDataset):
+
+    def __init__(
+        self,
+        repo_id: str,
+        action_tokenizer: ActionTokenizer,
+        base_tokenizer: PreTrainedTokenizerBase,
+        image_transform: ImageTransform,
+        prompt_builder_fn: Type[PromptBuilder],
+        *,
+        root: str | Path | None = None,
+        episodes: list[int] | None = None,
+        image_transforms: Callable | None = None,
+        delta_timestamps: dict[list[float]] | None = None,
+        tolerance_s: float = 1e-4,
+        download_videos: bool = True,
+        local_files_only: bool = False,
+        video_backend: str | None = None,
+    ) -> None:
+        super().__init__(
+            repo_id,
+            root,
+            episodes,
+            image_transforms,
+            delta_timestamps,
+            tolerance_s,
+            download_videos,
+            local_files_only,
+            video_backend,
+        )
+        assert isinstance(self.meta, LeRobotDatasetMetadata)
+
+        self.action_tokenizer = action_tokenizer
+        self.base_tokenizer = base_tokenizer
+        self.image_transform = image_transform
+        self.prompt_builder_fn = prompt_builder_fn
+
+        # Note =>> We expect the dataset to store statistics for action de-normalization.
+        self.dataset_statistics = {
+            "openvla_lerobot_dataset": {
+                "action": {
+                    "q01": np.array(self.meta.stats["action"]["q01"]),
+                    "q99": np.array(self.meta.stats["action"]["q99"]),
+                }
+            }
+        }
+
+        # Retrieve the name of image observations within metadata.
+        metadata_feature_dict = self.meta.info['features']
+        obs_image_keys = [
+            k for k in metadata_feature_dict.keys()
+            if isinstance(metadata_feature_dict[k], dict)
+            and metadata_feature_dict[k].get("dtype") == "video"
+        ]
+        if len(obs_image_keys) == 0:
+            raise ValueError(f"Provided data contains no videos")
+        if len(obs_image_keys) > 1:
+            raise ValueError(f"Provided data contains >1 video per episode")
+        self.obs_image_key = obs_image_keys[0]
+
+
+    def __len__(self):
+        return self.num_frames
+
+    # Retrieves a single (instruction, image, action) triple from the dataset.
+    def __getitem__(self, idx):
+
+        hf_item = super().__getitem__(idx)
+
+        # Retrieve image observation.
+        img_array: np.ndarray = (
+            hf_item[self.obs_image_key]
+            .permute(1, 2, 0)
+            .numpy() * 255
+        ).astype(np.uint8)
+        image = Image.fromarray(img_array)
+
+        # Retrieve instruction.
+        task_idx: torch.Tensor = hf_item["task_index"]
+        task_idx: int = task_idx.item()
+        instruction = self.meta.tasks[task_idx]
+
+        # Retrieve action.
+        action: torch.Tensor = hf_item["action"]
+        q01 = np.array(self.dataset_statistics["openvla_lerobot_dataset"]["action"]["q01"])
+        q99 = np.array(self.dataset_statistics["openvla_lerobot_dataset"]["action"]["q99"])
+        action = (2*action - q01 - q99) / (q99 - q01) # normalize to [-1, 1]
+        action: str = self.action_tokenizer(action)
+
+        # Add instruction to VLA prompt.
+        prompt_builder = self.prompt_builder_fn("openvla")
+        conversation = [
+            {
+                "from": "human",
+                "value": f"What action should the robot take to {instruction}?"
+            },
+            {
+                "from": "gpt",
+                "value": f"{action}"
+            },
+        ]
+        for turn in conversation:
+            prompt_builder.add_turn(turn["from"], turn["value"])
+        prompt = prompt_builder.get_prompt()
+
+        # Tokenize (w/ `base_tokenizer`)
+        input_ids = self.base_tokenizer(
+            prompt,
+            add_special_tokens=True
+        ).input_ids
+        labels = list(input_ids)
+
+        # Tensorize =>> Run Image Transform to get `pixel_values` =>> Return
+        #   =>> IMPORTANT :: IF WE'RE USING HF .forward(..., labels=labels), SHIFTING HAPPENS _INSIDE_ MODEL!
+        input_ids, labels = torch.tensor(input_ids), torch.tensor(labels)
+        pixel_values = self.image_transform(image)
+
+        # [CRITICAL] We do not want to take the loss for anything but the predicted action tokens!
+        labels[: -(len(action) + 1)] = IGNORE_INDEX
+
+        return dict(pixel_values=pixel_values, input_ids=input_ids, labels=labels)
+
+
 
 class DummyDataset(Dataset):
     def __init__(
@@ -203,17 +336,28 @@ class DummyDataset(Dataset):
         return 10000
 
     def __getitem__(self, idx):
-        # TODO =>> Load image, action and instruction from disk -- we use dummy values
-        image = Image.fromarray(np.asarray(np.random.rand(224, 224, 3) * 255.0, dtype=np.uint8))
+        """Get a single training example."""
+        # Generate random image, action and instruction
+        image = Image.fromarray(
+            np.asarray(np.random.rand(224, 224, 3) * 255.0, dtype=np.uint8)
+        )
         action = np.asarray(np.random.rand(7), dtype=np.float32)
         instruction = "do something spectacular"
 
-        # Add instruction to VLA prompt
+        # Build conversation prompt
         prompt_builder = self.prompt_builder_fn("openvla")
         conversation = [
-            {"from": "human", "value": f"What action should the robot take to {instruction}?"},
-            {"from": "gpt", "value": self.action_tokenizer(action)},
+            {
+                "from": "human",
+                "value": f"What action should the robot take to {instruction}?"
+            },
+            {
+                "from": "gpt", 
+                "value": self.action_tokenizer(action)
+            }
         ]
+
+        # Add conversation turns to prompt builder
         for turn in conversation:
             prompt_builder.add_turn(turn["from"], turn["value"])
 
