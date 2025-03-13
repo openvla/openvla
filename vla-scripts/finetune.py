@@ -224,7 +224,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         tolerance_s=cfg.tolerance_s,
         image_transforms=None,
         download_videos=False,
-        local_files_only=True,
+        # local_files_only=True,
     )
 
 

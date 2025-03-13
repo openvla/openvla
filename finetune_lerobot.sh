@@ -2,12 +2,12 @@
 PYTHONPATH="$PYTHONPATH:$(pwd)/lerobot" && \
 torchrun --standalone --nnodes 1 --nproc-per-node 1 vla-scripts/finetune.py \
 	--vla_path "openvla/openvla-7b" \
-	--data_root_dir "data/simple_task_lerobot" \
-	--dataset_name "main" \
+	--data_root_dir "data/robotgeneralist" \
+	--dataset_name "nomagic-simple-box" \
 	--run_root_dir ".runs/" \
 	--adapter_tmp_dir ".adapter/" \
 	--lora_rank 32 \
-	--batch_size 2 \
+	--batch_size 1 \
 	--grad_accumulation_steps 8 \
 	--learning_rate 5e-4 \
 	--image_aug True \
