@@ -1,0 +1,28 @@
+services:
+  devcontainer:
+    build:
+      context: ..
+      dockerfile: ./Dockerfile
+    working_dir: /workspace/openvla
+    command: sleep infinity
+    volumes:
+      - ..:/workspace/openvla:cached
+      - finetuner-cache:/root/.cache
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface # use cached models/datasets from host
+    environment:
+      - WANDB_API_KEY=${WANDB_API_KEY}
+      - WANDB_MODE=online
+      - HF_HOME=/root/.cache/huggingface
+      - HF_TOKEN=${HF_TOKEN}
+    shm_size: 16gb
+    network_mode: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  finetuner-cache:

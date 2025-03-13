@@ -1,0 +1,36 @@
+{
+    "name": "OpenVLA Development",
+    "dockerComposeFile": "docker-compose.yml",
+    "service": "devcontainer",
+    "workspaceFolder": "/workspace/openvla",
+    "containerEnv": {
+      "PYTHONPATH": "${containerWorkspaceFolder}"
+    },
+    "remoteEnv": {
+      // Environment variables will be loaded from .env
+    },
+    "customizations": {
+      "vscode": {
+        "extensions": [
+          "ms-python.python",
+          "ms-python.vscode-pylance",
+          "ms-toolsai.jupyter",
+          "github.copilot"
+        ],
+        "settings": {
+          "python.defaultInterpreterPath": "/usr/local/bin/python",
+          "python.linting.enabled": true,
+          "python.linting.pylintEnabled": true,
+          "python.formatting.provider": "black",
+          "editor.formatOnSave": true,
+          "editor.rulers": [121]
+        }
+      }
+    },
+    "remoteUser": "root",
+    "postCreateCommand": "pip install -e .",
+    // Load environment variables from .env file
+    "features": {
+      "ghcr.io/devcontainers/features/dotnet:1": {}
+    }
+  }

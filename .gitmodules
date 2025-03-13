@@ -1,9 +1,6 @@
 [submodule "aloha_sim_insertion_scripted_image"]
 	path = aloha_sim_insertion_scripted_image
 	url = https://huggingface.co/datasets/lerobot/aloha_sim_insertion_scripted_image
-[submodule "lerobot"]
-	path = lerobot
-	url = https://github.com/huggingface/lerobot
 [submodule "third_party/lerobot"]
 	path = third_party/lerobot
 	url = https://github.com/huggingface/lerobot.git

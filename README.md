@@ -104,43 +104,58 @@ above models are derived from Llama-2, and as such are subject to the
 
 ## Installation
 
-> **Note**: These installation instructions are for full-scale pretraining (and distributed fine-tuning); if looking to
-  just run inference with OpenVLA models (or perform lightweight fine-tuning), see instructions above!
+See [original instructions](https://github.com/openvla/openvla?tab=readme-ov-file#installation) for OpenVLA.
 
-This repository was built using Python 3.10, but should be backwards compatible with any Python >= 3.8. We require
-PyTorch 2.2.* -- installation instructions [can be found here](https://pytorch.org/get-started/locally/). The latest 
-version of this repository was developed and thoroughly tested with:
-  - PyTorch 2.2.0, torchvision 0.17.0, transformers 4.40.1, tokenizers 0.19.1, timm 0.9.10, and flash-attn 2.5.5
+#### Devcontainer
 
-**[5/21/24] Note**: Following reported regressions and breaking changes in later versions of `transformers`, `timm`, and
-`tokenizers` we explicitly pin the above versions of the dependencies. We are working on implementing thorough tests, 
-and plan on relaxing these constraints as soon as we can.
+We provide a VS Code devcontainer configuration. 
 
-Use the setup commands below to get started:
+1. Clone the repository with submodules:
+   ```bash
+   git clone --recurse-submodules https://github.com/openvla/openvla.git
+   cd openvla
+   ```
+
+2. Open the project in VS Code.
+
+3. When prompted by VS Code to "Reopen in Container", click "Reopen in Container". 
+
+4. Building the container might take up to 30 minutes at first.
+
+To configure secrets, get a fresh `.env` file from template:
+
+```
+cp .env.template .env
+```
+and populate it.
+
+#### Manually managed virtualenv
+
+Otherwise, for manual installation, something like this might work (soon to be replaced by a `uv`-managed configuration)
 
 ```bash
-# Create and activate conda environment
-conda create -n openvla python=3.10 -y
-conda activate openvla
+# Create and activate virtualenv
+virtualenv -p 3.10 openvla_env
+source openvla_env/bin/activate
 
-# Install PyTorch. Below is a sample command to do this, but you should check the following link
-# to find installation instructions that are specific to your compute platform:
-# https://pytorch.org/get-started/locally/
-conda install pytorch torchvision torchaudio pytorch-cuda=12.4 -c pytorch -c nvidia -y  # UPDATE ME!
-
-# Clone and install the openvla repo
-git clone https://github.com/openvla/openvla.git
+# Clone the repository with submodules
+git clone --recurse-submodules https://github.com/openvla/openvla.git
 cd openvla
+
+# Install OpenVLA
 pip install -e .
 
+# Install lerobot (included as a submodule)
+cd third_party/lerobot/
+pip install -e .
+cd ../../
+
 # Install Flash Attention 2 for training (https://github.com/Dao-AILab/flash-attention)
-#   =>> If you run into difficulty, try `pip cache remove flash_attn` first
+#   =>> If you run into difficulty, try `pip uninstall flash_attn -y` first
 pip install packaging ninja
 ninja --version; echo $?  # Verify Ninja --> should return exit code "0"
 pip install "flash-attn==2.5.5" --no-build-isolation
 ```
-
-If you run into any problems during the installation process, please file a GitHub Issue.
 
 **Note:** See `vla-scripts/` for full training and verification scripts for OpenVLA models. Note that `scripts/` is
 mostly a holdover from the original (base) `prismatic-vlms` repository, with support for training and evaluating

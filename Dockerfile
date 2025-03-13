@@ -1,20 +1,29 @@
 FROM pytorch/pytorch:2.1.2-cuda12.1-cudnn8-devel
 
-WORKDIR /home/marvin/alan/openvla_finetuner
-
-# Install system dependencies for flash-attn
+# Install system dependencies for flash-attn.
 RUN apt-get update && apt-get install -y \
     git \
     ninja-build \
     && rm -rf /var/lib/apt/lists/*
 
-# Install openvla, lerobot, and flash-attn; download openvla-7b
-COPY . /workspaces/openvla_finetuner
-WORKDIR /workspaces/openvla_finetuner
+WORKDIR /workspace
+RUN git clone -b merge-finetuner-changes https://github.com/nomagiclab/openvla.git && \
+    cd openvla && \
+    git submodule init third_party/lerobot && \
+    git submodule update --recursive --init third_party/lerobot 
+    
+WORKDIR /workspace/openvla
+
+RUN ls -la third_party/lerobot 
+
+# Editable install of openvla, then lerobot submodule, then reinstall newly
+# missing openvla dependencies to negotiate dependency incompatibility.
+# Then install flash-attn separately (per OpenVLA instructions)
+# and download the openvla-7b model.
 RUN pip install -e . && \
-    cd lerobot && \
+    cd third_party/lerobot/ && \
     pip install -e . && \
-    cd .. && \
+    cd ../../ && \
     pip check | awk '$1 ~ /openvla/ {gsub(/,/,"",$5); print $5}' | xargs pip install && \
     pip install packaging ninja && \
     pip install "flash-attn==2.5.5" --no-build-isolation && \
