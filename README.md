@@ -129,9 +129,14 @@ cp .env.template .env
 ```
 and populate it.
 
-#### Manually managed virtualenv
+#### Manual
 
-Otherwise, for manual installation, something like this might work (soon to be replaced by a `uv`-managed configuration)
+Otherwise, there is a script, `manual_create_env.sh` which will make a Python
+virtualenv for you. 
+
+```
+./manual_create_env.sh
+```
 
 ```bash
 # Create and activate virtualenv

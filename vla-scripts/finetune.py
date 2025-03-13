@@ -208,9 +208,9 @@ def finetune(cfg: FinetuneConfig) -> None:
     #       your own Dataset, make sure to add the appropriate logic to the training loop!
     #       # TODO: Figure this out
     # ---
-    from prismatic.vla.datasets.datasets import OpenVLALeRobotDataset
+    from prismatic.vla.datasets.datasets import RLDSLeRobotDataset
 
-    vla_dataset = OpenVLALeRobotDataset(
+    vla_dataset = RLDSLeRobotDataset(
         repo_id="NotRequired",
         action_tokenizer=action_tokenizer,
         base_tokenizer=processor.tokenizer,

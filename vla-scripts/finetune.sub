@@ -1,0 +1,68 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH -c 8
+#SBATCH --gres=gpu:1
+#SBATCH -t 6:00:00
+#SBATCH -p a100
+#SBATCH --mem=50G
+#SBATCH -o .slurmlog/slurm-%j.out
+#SBATCH -e .slurmlog/slurm-%j.err
+
+# --- Environment Setup ---
+
+module purge  # Start with a clean environment.
+module load cuda/11.8  # REPLACE with the CORRECT CUDA version!
+
+# Activate the virtual environment (created by create_env.sh).
+source .venv/bin/activate
+
+# Install flash-attn *after* loading CUDA.
+pip install "flash-attn==2.5.5" --no-build-isolation
+
+# Set environment variables for Weights & Biases logging
+if [[ -z "${WANDB_API_KEY}" ]]; then
+    echo "Warning: WANDB_API_KEY not set in environment, reading from .env file"
+    if [ -f .env ]; then
+        export WANDB_API_KEY=$(grep WANDB_API_KEY .env | cut -d '=' -f2)
+    else
+        echo "Error: .env file not found"
+        exit 1
+    fi
+fi
+
+if [[ -z "${WANDB_MODE}" ]]; then
+    export WANDB_MODE="online"
+fi
+
+# --- Run the Finetuning Script ---
+
+# Set PYTHONPATH and run the finetuning script using torchrun.
+# Note: We use the absolute path to finetune.py to avoid issues with
+#       relative paths within the Slurm job.
+PYTHONPATH="$PYTHONPATH:$(pwd)/lerobot" \
+torchrun \
+    --standalone \
+    --nnodes 1 \
+    --nproc-per-node 1 \
+    "$(pwd)"/vla-scripts/finetune.py \
+    --vla_path "openvla/openvla-7b" \
+    --data_root_dir "data" \
+    --dataset_name "nomagic-simple-box" \
+    --run_root_dir ".runs/" \
+    --adapter_tmp_dir ".adapter/" \
+    --lora_rank 32 \
+    --batch_size 16 \
+    --grad_accumulation_steps 1 \
+    --learning_rate 5e-4 \
+    --image_aug True \
+    --max_steps 25000 \
+    --save_steps 1000 \
+    --save_latest_checkpoint_only False \
+    --tolerance_s 0.01 \
+    --wandb_entity robotgeneralist \
+    --wandb_project openvla
+
+# To run this script, edit the options above, and then 
+# execute the following command from the root repository directory:
+# sbatch vla-scripts/finetune.sub
