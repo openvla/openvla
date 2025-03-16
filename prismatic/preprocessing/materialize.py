@@ -64,6 +64,16 @@ def get_dataset_and_collator(
             prompt_builder_fn=prompt_builder_fn,
         )
         return dataset, collator
-
+    
+    elif stage == "moe-lora":
+        annotation_json, image_dir = dataset_cfg.finetune_stage_components
+        dataset = dataset_cls(
+            dataset_root_dir / annotation_json,
+            dataset_root_dir / image_dir,
+            image_transform,
+            tokenizer,
+            prompt_builder_fn=prompt_builder_fn,
+        )
+        return dataset, collator
     else:
         raise ValueError(f"Stage `{stage}` is not supported!")
