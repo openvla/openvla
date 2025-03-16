@@ -7,6 +7,7 @@ General utilities and classes for facilitating data loading and collation.
 from dataclasses import dataclass
 from typing import Callable, Dict, Sequence, Tuple
 
+import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
@@ -123,19 +124,32 @@ class PaddedCollatorForActionPrediction:
 
         # Stack all `pixel_values` --> depending on type is torch.Tensor or Dict[str, torch.Tensor]
         if isinstance(pixel_values[0], torch.Tensor):
-            pixel_values = torch.stack(pixel_values)
-        elif isinstance(pixel_values[0], dict):
-            pixel_values = {
-                k: torch.stack([pixel_values[idx][k] for idx in range(len(input_ids))]) for k in pixel_values[0]
-            }
+            if "pixel_values_wrist" in instances[0]:
+                pixel_values_wrist = [instance["pixel_values_wrist"] for instance in instances]
+                pixel_values = torch.cat((torch.stack(pixel_values), torch.stack(pixel_values_wrist)), dim=1)
+            else:
+                pixel_values = torch.stack(pixel_values)
         else:
             raise ValueError(f"Unsupported `pixel_values` type = {type(pixel_values)}")
 
+        # Stack all actions
+        actions = [torch.from_numpy(np.copy(instance["actions"])) for instance in instances]
+        actions = torch.stack(actions)
+
+        # Stack proprio
+        if "proprio" in instances[0]:
+            proprio = [instance["proprio"] for instance in instances]
+            proprio = torch.Tensor(np.squeeze(np.stack(proprio)))
+        else:
+            proprio = None
+
         output = dict(
             pixel_values=pixel_values,
+            proprio=proprio,
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
+            actions=actions,
         )
         if dataset_names is not None:
             output["dataset_names"] = dataset_names

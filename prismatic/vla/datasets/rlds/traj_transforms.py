@@ -24,24 +24,22 @@ def chunk_act_obs(traj: Dict, window_size: int, future_action_window_size: int =
     """
     traj_len = tf.shape(traj["action"])[0]
     action_dim = traj["action"].shape[-1]
-    chunk_indices = tf.broadcast_to(tf.range(-window_size + 1, 1), [traj_len, window_size]) + tf.broadcast_to(
-        tf.range(traj_len)[:, None], [traj_len, window_size]
+    effective_traj_len = traj_len - future_action_window_size
+    chunk_indices = tf.broadcast_to(tf.range(-window_size + 1, 1), [effective_traj_len, window_size]) + tf.broadcast_to(
+        tf.range(effective_traj_len)[:, None], [effective_traj_len, window_size]
     )
 
     action_chunk_indices = tf.broadcast_to(
         tf.range(-window_size + 1, 1 + future_action_window_size),
-        [traj_len, window_size + future_action_window_size],
+        [effective_traj_len, window_size + future_action_window_size],
     ) + tf.broadcast_to(
-        tf.range(traj_len)[:, None],
-        [traj_len, window_size + future_action_window_size],
+        tf.range(effective_traj_len)[:, None],
+        [effective_traj_len, window_size + future_action_window_size],
     )
 
     floored_chunk_indices = tf.maximum(chunk_indices, 0)
 
-    if "timestep" in traj["task"]:
-        goal_timestep = traj["task"]["timestep"]
-    else:
-        goal_timestep = tf.fill([traj_len], traj_len - 1)
+    goal_timestep = tf.fill([effective_traj_len], traj_len - 1)
 
     floored_action_chunk_indices = tf.minimum(tf.maximum(action_chunk_indices, 0), goal_timestep[:, None])
 
@@ -51,22 +49,10 @@ def chunk_act_obs(traj: Dict, window_size: int, future_action_window_size: int =
     # indicates whether an entire observation is padding
     traj["observation"]["pad_mask"] = chunk_indices >= 0
 
-    # if no absolute_action_mask was provided, assume all actions are relative
-    if "absolute_action_mask" not in traj and future_action_window_size > 0:
-        logging.warning(
-            "future_action_window_size > 0 but no absolute_action_mask was provided. "
-            "Assuming all actions are relative for the purpose of making neutral actions."
-        )
-    absolute_action_mask = traj.get("absolute_action_mask", tf.zeros([traj_len, action_dim], dtype=tf.bool))
-    neutral_actions = tf.where(
-        absolute_action_mask[:, None, :],
-        traj["action"],  # absolute actions are repeated (already done during chunking)
-        tf.zeros_like(traj["action"]),  # relative actions are zeroed
-    )
-
-    # actions past the goal timestep become neutral
-    action_past_goal = action_chunk_indices > goal_timestep[:, None]
-    traj["action"] = tf.where(action_past_goal[:, :, None], neutral_actions, traj["action"])
+    # Truncate other elements of the trajectory dict
+    traj["task"] = tf.nest.map_structure(lambda x: tf.gather(x, tf.range(effective_traj_len)), traj["task"])
+    traj["dataset_name"] = tf.gather(traj["dataset_name"], tf.range(effective_traj_len))
+    traj["absolute_action_mask"] = tf.gather(traj["absolute_action_mask"], tf.range(effective_traj_len))
 
     return traj
 

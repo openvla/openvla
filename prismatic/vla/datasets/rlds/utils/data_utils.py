@@ -7,7 +7,6 @@ Additional RLDS-specific data utilities.
 import hashlib
 import json
 import os
-from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import dlimp as dl
@@ -16,6 +15,7 @@ import tensorflow as tf
 from tqdm import tqdm
 
 from prismatic.overwatch import initialize_overwatch
+from prismatic.vla.constants import NormalizationType
 
 # Initialize Overwatch =>> Wraps `logging.Logger`
 overwatch = initialize_overwatch(__name__)
@@ -43,15 +43,6 @@ def to_padding(tensor: tf.Tensor) -> tf.Tensor:
         return tf.fill(tf.shape(tensor), "")
     else:
         raise ValueError(f"Cannot generate padding for tensor of type {tensor.dtype}.")
-
-
-# Defines supported normalization schemes for action and proprioceptive state.
-class NormalizationType(str, Enum):
-    # fmt: off
-    NORMAL = "normal"               # Normalize to Mean = 0, Stdev = 1
-    BOUNDS = "bounds"               # Normalize to Interval = [-1, 1]
-    BOUNDS_Q99 = "bounds_q99"       # Normalize [quantile_01, ..., quantile_99] --> [-1, ..., 1]
-    # fmt: on
 
 
 # === State / Action Processing Primitives ===

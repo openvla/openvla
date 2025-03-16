@@ -206,5 +206,25 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
     "libero_10_no_noops": [
         ("libero_10_no_noops", 1.0),
     ],
-}
+    "libero_4_task_suites_no_noops": [
+        ("libero_spatial_no_noops", 1.0),
+        ("libero_object_no_noops", 1.0),
+        ("libero_goal_no_noops", 1.0),
+        ("libero_10_no_noops", 1.0),
+    ],
+
+    # === ALOHA Fine-Tuning Datasets ===
+    "aloha1_fold_shorts_20_demos": [
+        ("aloha1_fold_shorts_20_demos", 1.0),
+    ],
+    "aloha1_fold_shirt_30_demos": [
+        ("aloha1_fold_shirt_30_demos", 1.0),
+    ],
+    "aloha1_scoop_X_into_bowl_45_demos": [
+        ("aloha1_scoop_X_into_bowl_45_demos", 1.0),
+    ],
+    "aloha1_put_X_into_pot_300_demos": [
+        ("aloha1_put_X_into_pot_300_demos", 1.0),
+    ],
 # fmt: on
+}

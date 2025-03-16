@@ -3,17 +3,17 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "openvla"
+name = "openvla-oft"
 authors = [
     {name = "Moo Jin Kim", email="moojink@stanford.edu"},
-    {name = "Karl Pertsch", email="pertsch@berkeley.edu"},
-    {name = "Siddharth Karamcheti", email="skaramcheti@cs.stanford.edu"},
+    {name = "Chelsea Finn", email="cbfinn@cs.stanford.edu"},
+    {name = "Percy Liang", email="pliang@cs.stanford.edu"},
 ]
-description = "OpenVLA: Vision-Language-Action Models for Robotics"
-version = "0.0.3"
+description = "Fine-Tuning Vision-Language-Action Models: Optimizing Speed and Success"
+version = "0.0.1"
 readme = "README.md"
 requires-python = ">=3.8"
-keywords = ["vision-language-actions models", "multimodal pretraining", "robot learning"]
+keywords = ["vision-language-actions models", "fine-tuning", "robot learning"]
 license = {file = "LICENSE"}
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -47,12 +47,17 @@ dependencies = [
     "torch==2.2.0",
     "torchvision==0.17.0",
     "torchaudio==2.2.0",
-    "transformers==4.40.1",
+    "transformers @ git+https://github.com/moojink/transformers-openvla-oft.git",  # IMPORTANT: Use this fork for bidirectional attn (for parallel decoding)
     "wandb",
     "tensorflow==2.15.0",
     "tensorflow_datasets==4.9.3",
     "tensorflow_graphics==2021.12.3",
-    "dlimp @ git+https://github.com/moojink/dlimp_openvla"
+    "dlimp @ git+https://github.com/moojink/dlimp_openvla",
+    "diffusers",
+    "imageio",
+    "uvicorn",
+    "fastapi",
+    "json-numpy",
 ]
 
 [project.optional-dependencies]
@@ -69,9 +74,9 @@ sagemaker = [
 ]
 
 [project.urls]
-homepage = "https://github.com/openvla/openvla"
-repository = "https://github.com/openvla/openvla"
-documentation = "https://github.com/openvla/openvla"
+homepage = "https://github.com/moojink/openvla-oft"
+repository = "https://github.com/moojink/openvla-oft"
+documentation = "https://github.com/moojink/openvla-oft"
 
 [tool.setuptools.packages.find]
 where = ["."]
