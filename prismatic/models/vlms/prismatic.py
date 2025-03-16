@@ -26,6 +26,8 @@ from prismatic.models.backbones.vision import VisionBackbone
 from prismatic.models.vlms.base_vlm import VLM
 from prismatic.overwatch import initialize_overwatch
 from prismatic.util.nn_utils import FusedMLPProjector, LinearProjector, MLPProjector
+from prismatic.models.backbones.llm.moe import LoRA_MOE_LM
+from dataclasses import dataclass
 
 # Initialize Overwatch =>> Wraps `logging.Logger`
 overwatch = initialize_overwatch(__name__)
@@ -43,6 +45,12 @@ class PrismaticVLM(VLM):
         llm_backbone: LLMBackbone,
         enable_mixed_precision_training: bool = True,
         arch_specifier: str = "gelu-mlp",
+        use_moe_lora: bool = False,
+        moe_num_experts: int = 4,
+        moe_lora_rank: int = 32,
+        moe_lora_alpha: int = 16,
+        moe_balance_weight: float = 0.01,
+        dense_moe: bool = True,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -67,6 +75,21 @@ class PrismaticVLM(VLM):
         else:
             raise ValueError(f"PrismaticVLM with `{arch_specifier = }` is not supported!")
 
+        # MoE LoRA configuration
+        self.use_moe_lora = use_moe_lora
+        self.moe_num_experts = moe_num_experts
+        self.moe_lora_rank = moe_lora_rank
+        self.moe_lora_alpha = moe_lora_alpha
+        self.moe_balance_weight = moe_balance_weight
+        self.dense_moe = dense_moe
+        
+        # Create a simple args object for MoE
+        @dataclass
+        class MoEArgs:
+            dense_moe: bool
+        
+        self.moe_args = MoEArgs(dense_moe=dense_moe)
+        
         # Trackers
         self.vision_backbone_requires_grad = False
 
@@ -103,7 +126,6 @@ class PrismaticVLM(VLM):
             arch_specifier=arch_specifier,
             **kwargs,
         )
-
         # Load from Checkpoint (Custom --> should load both *projector* and *llm* weights)
         model_state_dict = torch.load(pretrained_checkpoint, map_location="cpu")["model"]
         assert (
@@ -130,13 +152,39 @@ class PrismaticVLM(VLM):
         """
         This function sets `requires_grad_` on each of the component modules explicitly, depending on stage.
 
-        We support two separate stages --> "align" and "finetune".
+        We support multiple stages:
             => "align" --> vision_backbone*, llm_backbone* are frozen; only the `projector` is trained.
             => "finetune" --> vision_backbone* is frozen; both `projector` and `llm_backbone` are trained.
+            => "full-finetune" --> All components are trained.
+            => "moe-lora" --> vision_backbone* is frozen; apply MoE LoRA to LLM MLP layers and train.
 
-        :param stage: Pretraining stage in < "align" | "finetune" | "full-finetune" | "vla-train" | "vla-full-train" >
+        :param stage: Pretraining stage in < "align" | "finetune" | "full-finetune" | "vla-train" | "vla-full-train" | "moe-lora" >
         """
-        if stage == "align":
+        if stage == "moe-lora":
+            # Freeze vision backbone
+            self.vision_backbone.requires_grad_(False)
+            
+            # Freeze LLM backbone
+            self.llm_backbone.requires_grad_(False)
+            
+            # Apply MoE LoRA to LLM backbone
+            self.apply_moe_lora()
+            
+            # Projector can be trained
+            self.projector.requires_grad_(True)
+            
+            # Add to `self.trainable_module_keys`
+            self.trainable_module_keys = ["projector", "llm_backbone"]
+            
+            # Update Trackers
+            self.vision_backbone_requires_grad = False
+            
+            # Explicitly Log Frozen / Trainable Components
+            overwatch.info(f"[Frozen]    🥶 =>> Vision Backbone `{self.vision_backbone.identifier}`", ctx_level=1)
+            overwatch.info(f"[TRAINABLE] 🔥 =>> LLM Backbone (MoE LoRA) `{self.llm_backbone.identifier}`", ctx_level=1)
+            overwatch.info(f"[TRAINABLE] 🔥 =>> Projector `{self.arch_specifier}`", ctx_level=1)
+
+        elif stage == "align":
             self.vision_backbone.requires_grad_(False)
             self.llm_backbone.requires_grad_(False)
             self.projector.requires_grad_(True)
@@ -229,6 +277,30 @@ class PrismaticVLM(VLM):
             overwatch.info(f"[Frozen, except last layer] 🥶🔥 =>> LLM Backbone `{self.llm_backbone.identifier}`", ctx_level=1)  # noqa: E501
             overwatch.info(f"[TRAINABLE]                 🔥   =>> Projector `{self.arch_specifier}`", ctx_level=1)
             # fmt: on
+
+        elif stage == "moe-lora":
+            # Freeze vision backbone
+            self.vision_backbone.requires_grad_(False)
+            
+            # Freeze LLM backbone
+            self.llm_backbone.requires_grad_(False)
+            
+            # Apply MoE LoRA to LLM backbone
+            self.apply_moe_lora()
+            
+            # Projector can be trained
+            self.projector.requires_grad_(True)
+            
+            # Add to `self.trainable_module_keys`
+            self.trainable_module_keys = ["projector", "llm_backbone"]
+            
+            # Update Trackers
+            self.vision_backbone_requires_grad = False
+            
+            # Explicitly Log Frozen / Trainable Components
+            overwatch.info(f"[Frozen]    🥶 =>> Vision Backbone `{self.vision_backbone.identifier}`", ctx_level=1)
+            overwatch.info(f"[TRAINABLE] 🔥 =>> LLM Backbone (MoE LoRA) `{self.llm_backbone.identifier}`", ctx_level=1)
+            overwatch.info(f"[TRAINABLE] 🔥 =>> Projector `{self.arch_specifier}`", ctx_level=1)
 
         else:
             raise ValueError(f"Stage `{stage}` is not supported for LLaVa! Try < align | finetune >")
@@ -467,7 +539,7 @@ class PrismaticVLM(VLM):
             fused_labels = torch.vstack([multimodal_labels, unimodal_labels])
 
         # Run LLM Forward --> returns CausalLMOutputWithPast!
-        return self.llm_backbone(
+        outputs = self.llm_backbone(
             input_ids=None,
             attention_mask=fused_attention_mask,
             position_ids=None,
@@ -479,7 +551,35 @@ class PrismaticVLM(VLM):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
-
+        
+        # Handle MoE LoRA balancing loss if applicable
+        if self.use_moe_lora and self.training:
+            # Extract routing information from LLM layers
+            routing_info = []
+            
+            # Collect routing information from each layer
+            if hasattr(self.llm_backbone, "llm") and hasattr(self.llm_backbone.llm, "model"):
+                if hasattr(self.llm_backbone.llm.model, "layers"):
+                    for layer in self.llm_backbone.llm.model.layers:
+                        if hasattr(layer, "mlp") and hasattr(layer.mlp, "forward") and isinstance(layer.mlp, LoRA_MOE_LM):
+                            # Store the routing information for later use
+                            if hasattr(layer.mlp, "_last_routing_info"):
+                                routing_info.append(layer.mlp._last_routing_info)
+            
+            if routing_info:
+                # Calculate expert balancing loss
+                moe_balance_loss = 0.0
+                batch_size = input_ids.shape[0] if input_ids is not None else fused_embeddings.shape[0]
+                
+                for routing, expert_choice in routing_info:
+                    # Calculate load balancing loss: encourage uniform expert utilization
+                    moe_balance_loss += (routing.mean(0) * expert_choice.mean(0)).sum()
+                
+                # Add balancing loss to the main loss
+                if hasattr(outputs, "loss") and outputs.loss is not None:
+                    outputs.loss = outputs.loss + (moe_balance_loss / len(routing_info)) * self.moe_balance_weight
+        
+        return outputs
     # === GenerationMixin Methods ===
     #   => Note: The following methods override the functionality of `transformers.GenerationMixin`; these expect the
     #            contract in each of the function signatures, and also expect our `forward` function to roughly take
@@ -619,3 +719,4 @@ class PrismaticVLM(VLM):
         generated_text = tokenizer.decode(generated_ids[0, input_ids.shape[1] :], skip_special_tokens=True).strip()
 
         return generated_text
+

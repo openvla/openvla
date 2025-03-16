@@ -70,6 +70,14 @@ class ModelConfig(ChoiceRegistry):
     enable_mixed_precision_training: bool = True            # Whether to enable mixed precision training
     reduce_in_full_precision: bool = False                  # Whether to run gradient reduction in FP32
 
+    # Add MoE LoRA parameters
+    use_moe_lora: bool = False
+    moe_num_experts: int = 4
+    moe_lora_rank: int = 32
+    moe_lora_alpha: int = 16
+    moe_balance_weight: float = 0.01
+    dense_moe: bool = True
+
     # fmt: on
 
 

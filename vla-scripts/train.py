@@ -80,6 +80,14 @@ class TrainConfig:
     wandb_project: str = "openvla"                                  # Name of W&B project to log to (use default!)
     wandb_entity: str = "stanford-voltron"                          # Name of entity to log under
 
+    # Add MoE LoRA parameters
+    use_moe_lora: bool = False
+    moe_num_experts: int = 4
+    moe_lora_rank: int = 32
+    moe_lora_alpha: int = 16
+    moe_balance_weight: float = 0.01
+    dense_moe: bool = True
+
     def __post_init__(self) -> None:
         """Lift optimization parameters from `self.vla` for ease of use =>> validate on `expected_world_size`"""
         self.epochs = self.vla.epochs
@@ -156,8 +164,25 @@ def train(cfg: TrainConfig) -> None:
     for param in vlm.parameters():
         assert param.dtype == torch.float32, f"Loaded VLM parameter not in full precision: {param}"
 
-    # Determine training "stage" based on frozen vs unfrozen parameters --> supports different fine-tuning schemes!
-    if not cfg.vla.freeze_vision_backbone and not cfg.vla.freeze_llm_backbone:
+    # Create VLM with MoE LoRA configuration if enabled
+    vlm = PrismaticVLM(
+        model_id=vla_id,
+        vision_backbone=vlm.vision_backbone,
+        llm_backbone=vlm.llm_backbone,
+        enable_mixed_precision_training=True,
+        arch_specifier=cfg.vla.arch_specifier,
+        use_moe_lora=cfg.use_moe_lora,
+        moe_num_experts=cfg.moe_num_experts,
+        moe_lora_rank=cfg.moe_lora_rank,
+        moe_lora_alpha=cfg.moe_lora_alpha,
+        moe_balance_weight=cfg.moe_balance_weight,
+        dense_moe=cfg.dense_moe,
+    )
+
+    # Determine training stage
+    if cfg.use_moe_lora:
+        stage = "moe-lora"
+    elif not cfg.vla.freeze_vision_backbone and not cfg.vla.freeze_llm_backbone:
         stage = "vla-full-train"  # Full fine-tuning
     elif cfg.vla.freeze_vision_backbone and not cfg.vla.freeze_llm_backbone:
         stage = "vla-train"  # Frozen vision encoder
