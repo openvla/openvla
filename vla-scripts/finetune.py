@@ -317,15 +317,14 @@ def finetune(cfg: FinetuneConfig) -> None:
                 optimizer.zero_grad()
                 progress.update()
 
-            # Save Model Checkpoint =>> by default, only keeps the latest checkpoint, continually overwriting it!
-            if gradient_step_idx > 0 and gradient_step_idx % cfg.save_steps == 0:
+            def checkpoint():
                 if distributed_state.is_main_process:
                     print(f"Saving Model Checkpoint for Step {gradient_step_idx}")
 
                     # If LoRA, we first save adapter weights, then merge into full model; otherwise, default save!
                     save_dir = adapter_dir if cfg.use_lora else run_dir
 
-                    # Save Processor & Weights
+                    # Save Processor & Weights, this overwrites the latest checkpoint
                     processor.save_pretrained(run_dir)
                     vla.module.save_pretrained(save_dir)
 
@@ -339,14 +338,13 @@ def finetune(cfg: FinetuneConfig) -> None:
                         cfg.vla_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, trust_remote_code=True
                     )
                     merged_vla = PeftModel.from_pretrained(base_vla, adapter_dir)
-                    merged_vla = merged_vla.merge_and_unload()
+                    merged_vla = merged_vla.merge_and_unload(progressbar=True)
                     if distributed_state.is_main_process:
-                        if cfg.save_latest_checkpoint_only:
-                            # Overwrite latest checkpoint
-                            merged_vla.save_pretrained(run_dir)
+                        # Overwrite latest checkpoint
+                        merged_vla.save_pretrained(run_dir)
+                        print(f"Saved Model Checkpoint for Step {gradient_step_idx} at: {run_dir}")
 
-                            print(f"Saved Model Checkpoint for Step {gradient_step_idx} at: {run_dir}")
-                        else:
+                        if not cfg.save_latest_checkpoint_only:
                             # Prepare to save checkpoint in new directory
                             checkpoint_dir = Path(str(run_dir) + f"--{gradient_step_idx}_chkpt")
                             os.makedirs(checkpoint_dir, exist_ok=True)
@@ -359,6 +357,19 @@ def finetune(cfg: FinetuneConfig) -> None:
                             merged_vla.save_pretrained(checkpoint_dir)
 
                             print(f"Saved Model Checkpoint for Step {gradient_step_idx} at: {checkpoint_dir}")
+                elif not cfg.save_latest_checkpoint_only:
+                    # Prepare to save checkpoint in new directory
+                    checkpoint_dir = Path(str(run_dir) + f"--{gradient_step_idx}_chkpt")
+                    os.makedirs(checkpoint_dir, exist_ok=True)
+
+                    # Save dataset statistics to new directory
+                    save_dataset_statistics(vla_dataset.dataset_statistics, checkpoint_dir)
+
+                    # Save processor and model weights to new directory
+                    processor.save_pretrained(checkpoint_dir)
+                    vla.module.save_pretrained(checkpoint_dir)
+
+                    print(f"Saved Model Checkpoint for Step {gradient_step_idx} at: {checkpoint_dir}")
 
                 # Block on Main Process Checkpointing
                 dist.barrier()
@@ -366,7 +377,13 @@ def finetune(cfg: FinetuneConfig) -> None:
             # Stop training when max_steps is reached
             if gradient_step_idx == cfg.max_steps:
                 print(f"Max step {cfg.max_steps} reached! Stopping training...")
+                # last step always creates the final checkpoint
+                checkpoint()
                 break
+
+            # Save Model Checkpoint
+            if gradient_step_idx > 0 and gradient_step_idx % cfg.save_steps == 0:
+                checkpoint()
 
 
 if __name__ == "__main__":
