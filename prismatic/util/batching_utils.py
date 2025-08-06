@@ -170,7 +170,7 @@ class SplitModalitySampler(Sampler):
         all_batches = [merged_batches[idx] for idx in merge_idxs]
 
         # [Quality of Life] Shift "max length" batch to index 0 --> if we OOM, it happens immediately!
-        all_lengths = [length + ((_n_patches := 24 * 24) if is_mm else 0) for is_mm, length in self.modality_lengths]
+        all_lengths = [length for is_mm, length in self.modality_lengths]
         all_batches_max_lengths = []
         for batch in all_batches:
             all_batches_max_lengths.append(max([all_lengths[idx] for idx in batch]))
