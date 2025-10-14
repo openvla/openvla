@@ -30,6 +30,8 @@ from libero.libero import benchmark
 
 import wandb
 
+import time
+
 # Append current directory so that interpreter can find experiments.robot
 sys.path.append("../..")
 from experiments.robot.libero.libero_utils import (
@@ -59,7 +61,9 @@ class GenerateConfig:
     # Model-specific parameters
     #################################################################################################################
     model_family: str = "openvla"                    # Model family
-    pretrained_checkpoint: Union[str, Path] = ""     # Pretrained checkpoint path
+    
+    pretrained_checkpoint: Union[str, Path] = "/workspace/models/openvla-7b-libero-spatial"     # Pretrained checkpoint path
+    
     load_in_8bit: bool = False                       # (For OpenVLA only) Load with 8-bit quantization
     load_in_4bit: bool = False                       # (For OpenVLA only) Load with 4-bit quantization
 
@@ -138,7 +142,12 @@ def eval_libero(cfg: GenerateConfig) -> None:
     task_suite = benchmark_dict[cfg.task_suite_name]()
     num_tasks_in_suite = task_suite.n_tasks
     print(f"Task suite: {cfg.task_suite_name}")
+    
+    print(f"Task number: {num_tasks_in_suite}")
+    
     log_file.write(f"Task suite: {cfg.task_suite_name}\n")
+    
+    log_file.write(f"Task number: {num_tasks_in_suite}\n")
 
     # Get expected image dimensions
     resize_size = get_image_resize_size(cfg)
@@ -157,6 +166,15 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
         # Start episodes
         task_episodes, task_successes = 0, 0
+        
+        setups = []
+        obses = []
+        acts = []
+        exes = []
+        eps = []
+        frames = []
+        cur_success = 0
+        
         for episode_idx in tqdm.tqdm(range(cfg.num_trials_per_task)):
             print(f"\nTask: {task_description}")
             log_file.write(f"\nTask: {task_description}\n")
@@ -183,17 +201,32 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
             print(f"Starting episode {task_episodes+1}...")
             log_file.write(f"Starting episode {task_episodes+1}...\n")
+            
+            start_time = time.time()
+            end_time = -1
+            obs_times = []
+            act_times = []
+            exe_times = []
+            setup_times = []
+            
             while t < max_steps + cfg.num_steps_wait:
                 try:
                     # IMPORTANT: Do nothing for the first few timesteps because the simulator drops objects
                     # and we need to wait for them to fall
                     if t < cfg.num_steps_wait:
+                        st1 = time.time()
                         obs, reward, done, info = env.step(get_libero_dummy_action(cfg.model_family))
+                        ed1 = time.time()
+                        setup_times.append(ed1 - st1)
+
                         t += 1
                         continue
-
+                    
                     # Get preprocessed image
+                    st2 = time.time()
                     img = get_libero_image(obs, resize_size)
+                    ed2 = time.time()
+                    obs_times.append(ed2 - st2)
 
                     # Save preprocessed image for replay video
                     replay_images.append(img)
@@ -208,6 +241,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
                     }
 
                     # Query model to get action
+                    st3 = time.time()
                     action = get_action(
                         cfg,
                         model,
@@ -215,6 +249,8 @@ def eval_libero(cfg: GenerateConfig) -> None:
                         task_description,
                         processor=processor,
                     )
+                    ed3 = time.time()
+                    act_times.append(ed3 - st3)
 
                     # Normalize gripper action [0,1] -> [-1,+1] because the environment expects the latter
                     action = normalize_gripper_action(action, binarize=True)
@@ -225,10 +261,25 @@ def eval_libero(cfg: GenerateConfig) -> None:
                         action = invert_gripper_action(action)
 
                     # Execute action in environment
+                    st4 = time.time()
                     obs, reward, done, info = env.step(action.tolist())
+                    ed4 = time.time()
+                    exe_times.append(ed4 - st4)
+                    
                     if done:
+                        end_time = time.time()
+                        
                         task_successes += 1
                         total_successes += 1
+                        
+                        cur_success += 1
+                        setups.append(sum(setup_times))
+                        obses.append(sum(obs_times) / len(obs_times))
+                        exes.append(sum(exe_times) / len(exe_times))
+                        acts.append(sum(act_times) / len(act_times))
+                        eps.append(end_time - start_time)
+                        frames.append(t - cfg.num_steps_wait)
+                        
                         break
                     t += 1
 
@@ -253,6 +304,17 @@ def eval_libero(cfg: GenerateConfig) -> None:
             log_file.write(f"# episodes completed so far: {total_episodes}\n")
             log_file.write(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)\n")
             log_file.flush()
+
+            if cur_success == 5:
+                with open("/workspace/openvla/profile.txt", 'a') as file:
+                    file.write(f"Task: {task_description}\n")
+                    file.write(f"Avg frames: {sum(frames) / len(frames) if frames else 0}\n")
+                    file.write(f"Avg episodes time: {sum(eps) / len(eps) if eps else 0}\n")
+                    file.write(f"Avg setup time: {sum(setups) / len(setups) if setups else 0}\n")
+                    file.write(f"Avg observation time per frame: {sum(obses) / len(obses) if obses else 0}\n")
+                    file.write(f"Avg action prediction time per frame: {sum(acts) / len(acts) if acts else 0}\n")
+                    file.write(f"Avg execution time per frame: {sum(exe_times) / len(exe_times) if exe_times else 0}\n")
+                break
 
         # Log final results
         print(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
