@@ -1,22 +1,3 @@
-"""
-run_libero_eval.py
-
-Runs a model in a LIBERO simulation environment.
-
-Usage:
-    # OpenVLA:
-    # IMPORTANT: Set `center_crop=True` if model is fine-tuned with augmentations
-    python experiments/robot/libero/run_libero_eval.py \
-        --model_family openvla \
-        --pretrained_checkpoint <CHECKPOINT_PATH> \
-        --task_suite_name [ libero_spatial | libero_object | libero_goal | libero_10 | libero_90 ] \
-        --center_crop [ True | False ] \
-        --run_id_note <OPTIONAL TAG TO INSERT INTO RUN ID FOR LOGGING> \
-        --use_wandb [ True | False ] \
-        --wandb_project <PROJECT> \
-        --wandb_entity <ENTITY>
-"""
-
 import os
 import sys
 from dataclasses import dataclass
@@ -27,7 +8,11 @@ import draccus
 import numpy as np
 import tqdm
 from libero.libero import benchmark
+import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
 
+import json
 import wandb
 
 # Append current directory so that interpreter can find experiments.robot
@@ -77,15 +62,194 @@ class GenerateConfig:
     #################################################################################################################
     run_id_note: Optional[str] = None                # Extra note to add in run ID for logging
     local_log_dir: str = "./experiments/logs"        # Local directory for eval logs
+    fig_draw_dir: str = "./results"
 
     use_wandb: bool = False                          # Whether to also log results in Weights & Biases
     wandb_project: str = "YOUR_WANDB_PROJECT"        # Name of W&B project to log to (use default!)
     wandb_entity: str = "YOUR_WANDB_ENTITY"          # Name of entity to log under
-
+    
+    num_seg: int = 10
     seed: int = 7                                    # Random Seed (for reproducibility)
-
+    device: str = 'cuda:0'
     # fmt: on
 
+def _cosine(u, v, eps: float = 1e-12):
+    u = np.asarray(u, dtype=np.float64)
+    v = np.asarray(v, dtype=np.float64)
+    num = np.sum(u * v, axis=-1)
+    den = (np.linalg.norm(u, axis=-1) * np.linalg.norm(v, axis=-1)) + eps
+    cos = num / den
+    if cos.ndim == 0:
+        return float(cos)
+    return cos
+
+def _row_normalize(W):
+    s = W.sum(axis=1, keepdims=True)
+    s = np.where(s <= 0.0, 1.0, s)
+    return W / s
+
+def _entropy_vec(W):
+    Wc = np.clip(W, 1e-12, 1.0)
+    return -(Wc * np.log(Wc)).sum(axis=1)
+
+def _swap_ratio_pairwise(W):
+    if W.shape[0] <= 1:
+        return np.zeros(0, dtype=float)
+    diffs = np.abs(W[1:] - W[:-1]).sum(axis=1)
+    s_prev = np.sort(W[:-1], axis=1)[:, ::-1]
+    s_next = np.sort(W[1:],  axis=1)[:, ::-1]
+    diffs_shape = np.abs(s_next - s_prev).sum(axis=1)
+    num = np.maximum(0.0, diffs - diffs_shape)
+    den = np.maximum(1e-12, diffs)
+    return num / den
+
+def _segment_means(E: np.ndarray, S: int = 10):
+    E = np.asarray(E, dtype=np.float64)
+    if E.ndim != 2 or E.shape[0] == 0:
+        raise ValueError("E must be (T, D) with T > 0")
+
+    T, D = E.shape
+    if S <= 0:
+        raise ValueError("S must be a positive integer")
+
+    En = E / np.maximum(np.linalg.norm(E, axis=1, keepdims=True), 1e-12)
+
+    seg_ids = np.clip(((np.arange(T) + 1) * S // T) - 1, 0, S - 1).astype(int)
+
+    seg_means = np.zeros((S, D), dtype=np.float64)
+    seg_counts = np.zeros(S, dtype=int)
+    for s in range(S):
+        idx = np.where(seg_ids == s)[0]
+        if idx.size > 0:
+            m = En[idx].mean(axis=0)
+            seg_means[s] = m / (np.linalg.norm(m) + 1e-12)
+            seg_counts[s] = idx.size
+        else:
+            seg_means[s] = np.nan 
+
+    if np.isnan(seg_means).any():
+        global_mean = En.mean(axis=0)
+        global_mean /= (np.linalg.norm(global_mean) + 1e-12)
+
+        for s in range(S):
+            if not np.isnan(seg_means[s]).any():
+                continue
+            left = next((k for k in range(s - 1, -1, -1) if seg_counts[k] > 0), None)
+            right = next((k for k in range(s + 1, S) if seg_counts[k] > 0), None)
+
+            if left is not None and right is not None:
+                m = 0.5 * (seg_means[left] + seg_means[right])
+            elif left is not None:
+                m = seg_means[left]
+            elif right is not None:
+                m = seg_means[right]
+            else:
+                m = global_mean
+            seg_means[s] = m / (np.linalg.norm(m) + 1e-12)
+
+    return seg_means, seg_counts
+
+def analyze_episode_two_metrics(ep_name, eps_buf, save_dir, N=10):
+    os.makedirs(save_dir, exist_ok=True)
+    if "w_seq" not in eps_buf or len(eps_buf["w_seq"]) == 0:
+        raise ValueError("eps_buf['w_seq'] is empty or does not exist.")
+
+    W = np.stack(eps_buf["w_seq"], axis=0).astype(np.float64)  # (T, M)
+    if W.ndim != 2:
+        raise ValueError(f"W shape is illegal: {W.shape}")
+    T, M = W.shape
+    if T < N:
+        raise ValueError(f"T={T} is less than N={N}")
+    W = _row_normalize(W)
+
+    H_t  = _entropy_vec(W)    
+    SR_t = _swap_ratio_pairwise(W) 
+
+    desired_keys = ["p1", "p3", "p5", "p10"]
+    focus_pair_map = {}        
+    focus_overall_mean_map = {}     
+    focus_seg_mean_map = {}        
+    focus_seg_count_map = {}     
+
+    raw_pair_map = eps_buf.get("focus_shift_pair_t_map", {}) or {}
+    idx = np.linspace(0, T, N + 1, dtype=int)
+
+    for k in desired_keys:
+        fs_seq = np.asarray(raw_pair_map.get(k, []), dtype=np.float64)
+        focus_pair_map[k] = fs_seq 
+
+        if fs_seq.size > 0:
+            v = fs_seq[np.isfinite(fs_seq)]
+            focus_overall_mean_map[k] = float(np.mean(v)) if v.size > 0 else float("nan")
+        else:
+            focus_overall_mean_map[k] = float("nan")
+
+        seg_means = np.full(N, np.nan, dtype=np.float64)
+        seg_counts = np.zeros(N, dtype=int)
+        for s in range(N):
+            a, b = idx[s], idx[s+1]
+            if fs_seq.size == 0:
+                continue
+            end = min(b - 1, fs_seq.size)
+            start = min(a, end)
+            if end - start >= 1:
+                v = fs_seq[start:end]
+                v = v[np.isfinite(v)]
+                if v.size > 0:
+                    seg_means[s] = float(np.mean(v))
+                    seg_counts[s] = int(v.size)
+        focus_seg_mean_map[k] = seg_means.tolist()
+        focus_seg_count_map[k] = seg_counts.tolist()
+
+    rows = []
+    for s in range(N):
+        a, b = idx[s], idx[s+1]
+        Hs = H_t[a:b]
+        H_mean = float(np.mean(Hs))
+        H_std  = float(np.std(Hs, ddof=1)) if Hs.size > 1 else 0.0
+        SR_mean = float(np.mean(SR_t[a:b-1])) if (b - a) >= 2 else float("nan")
+
+        rows.append({
+            "segment": int(s),
+            "t_start": int(a),
+            "t_end":   int(b - 1),
+            "H_mean": H_mean,
+            "H_std":  H_std,
+            "swapratio_mean": SR_mean,
+            "focus_p1_mean":  focus_seg_mean_map["p1"][s],
+            "focus_p3_mean":  focus_seg_mean_map["p3"][s],
+            "focus_p5_mean":  focus_seg_mean_map["p5"][s],
+            "focus_p10_mean": focus_seg_mean_map["p10"][s],
+        })
+
+    out_json = {
+        "episode": ep_name,
+        "T": int(T),
+        "N": int(N),
+        "rows": rows, 
+        "H_t": H_t.tolist(),
+        "swapratio_pair_t": SR_t.tolist(),
+        "focus_top_pcts": [0.01, 0.03, 0.05, 0.10],
+        "focus_shift_pair_t_map": {k: focus_pair_map.get(k, np.array([], dtype=np.float64)).tolist() for k in desired_keys}, 
+        "focus_shift_overall_mean_map": {k: float(focus_overall_mean_map[k]) for k in desired_keys},
+        "focus_shift_seg_mean_map": {k: focus_seg_mean_map[k] for k in desired_keys},
+        "focus_shift_seg_count_map": {k: focus_seg_count_map[k] for k in desired_keys},  
+    }
+
+    out_path = os.path.join(save_dir, f"{ep_name}_two_metrics.json")
+    with open(out_path, "w") as f:
+        json.dump(out_json, f, indent=2)
+
+    return {
+        "rows": rows,
+        "H_t": H_t,
+        "swapratio_pair_t": SR_t,
+        "focus_shift_pair_t_map": focus_pair_map,
+        "focus_shift_overall_mean_map": focus_overall_mean_map,
+        "focus_shift_seg_mean_map": focus_seg_mean_map,
+        "focus_shift_seg_count_map": focus_seg_count_map,
+        "json_path": out_path,
+    }
 
 @draccus.wrap()
 def eval_libero(cfg: GenerateConfig) -> None:
@@ -160,11 +324,14 @@ def eval_libero(cfg: GenerateConfig) -> None:
         for episode_idx in tqdm.tqdm(range(cfg.num_trials_per_task)):
             print(f"\nTask: {task_description}")
             log_file.write(f"\nTask: {task_description}\n")
+            
+            eps_buf = dict()
 
             # Reset environment
             env.reset()
 
             # Set initial states
+
             obs = env.set_init_state(initial_states[episode_idx])
 
             # Setup
@@ -213,6 +380,10 @@ def eval_libero(cfg: GenerateConfig) -> None:
                         model,
                         observation,
                         task_description,
+                        task_id,
+                        episode_idx,
+                        t,
+                        eps_buf,
                         processor=processor,
                     )
 
@@ -236,13 +407,13 @@ def eval_libero(cfg: GenerateConfig) -> None:
                     print(f"Caught exception: {e}")
                     log_file.write(f"Caught exception: {e}\n")
                     break
-
+            
+            analyze_episode_two_metrics(ep_name=f"ep_{task_id+1}_{episode_idx+1}", eps_buf=eps_buf, save_dir=os.path.join(cfg.fig_draw_dir, cfg.task_suite_name, 'seed_'+str(cfg.seed)), N=cfg.num_seg)
             task_episodes += 1
             total_episodes += 1
 
-            # Save a replay video of the episode
             save_rollout_video(
-                replay_images, total_episodes, success=done, task_description=task_description, log_file=log_file
+                cfg.task_suite_name, cfg.seed, replay_images, total_episodes, success=done, task_description=task_description, log_file=log_file
             )
 
             # Log current results
