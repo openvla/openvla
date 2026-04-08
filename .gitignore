@@ -151,3 +151,11 @@ data/
 # Rollout videos and wandb logs
 rollouts/
 wandb/
+
+# local eval artifacts
+experiments/logs/
+rollouts/
+
+# local eval artifacts
+experiments/logs/
+rollouts/

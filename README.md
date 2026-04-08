@@ -1,645 +1,535 @@
-# OpenVLA: An Open-Source Vision-Language-Action Model
-
-[![arXiv](https://img.shields.io/badge/arXiv-2406.09246-df2a2a.svg?style=for-the-badge)](https://arxiv.org/abs/2406.09246)
-[![HF Models](https://img.shields.io/badge/%F0%9F%A4%97-Models-yellow?style=for-the-badge)](https://huggingface.co/openvla/openvla-7b)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.2.0-EE4C2C.svg?style=for-the-badge&logo=pytorch)](https://pytorch.org/get-started/locally/)
-[![Python](https://img.shields.io/badge/python-3.10-blue?style=for-the-badge)](https://www.python.org)
-[![License](https://img.shields.io/github/license/TRI-ML/prismatic-vlms?style=for-the-badge)](LICENSE)
- 
-[**Getting Started**](#getting-started) | [**Pretrained VLAs**](#pretrained-vlas) | [**Installation**](#installation) | [**Fine-Tuning OpenVLA via LoRA**](#fine-tuning-openvla-via-lora) | [**Fully Fine-Tuning OpenVLA**](#fully-fine-tuning-openvla) |
-[**Training VLAs from Scratch**](#training-vlas-from-scratch) | [**Evaluating OpenVLA**](#evaluating-openvla) | [**Project Website**](https://openvla.github.io/)
-
-
-<hr style="border: 2px solid gray;"></hr>
-
-## Latest Updates
-- [2025-03-03] OFT (Optimized Fine-Tuning recipe for VLAs) was recently released! Compared to vanilla OpenVLA fine-tuning, OFT enables 25-50x faster inference speed, higher task success rates, multiple input images, and high-frequency bimanual robot control. Unlike FAST, OFT uses continuous actions for greater model quality. See project website [here](https://openvla-oft.github.io/).
-- [2025-01-16] The FAST action tokenizer was recently released! Compared to vanilla OpenVLA-style 256-bin action discretization, FAST allows action chunks to be compressed into fewer tokens, speeding up inference by up to 15x when using discrete robot actions. See project website [here](https://www.physicalintelligence.company/research/fast).
-- [2024-10-15] Added a [VLA Performance Troubleshooting](#vla-performance-troubleshooting) section to the README with best practices for debugging poor VLA performance after fine-tuning.
-- [2024-09-04] Added LIBERO simulation benchmark fine-tuning experiments to paper (see v2 on [arXiv](https://arxiv.org/abs/2406.09246));
-  added instructions for reproducing OpenVLA results in [LIBERO Simulation Benchmark Evaluations](#libero-simulation-benchmark-evaluations) section
-- [2024-08-14] Added new section, [Evaluating OpenVLA](#evaluating-openvla), with instructions for running BridgeData V2 WidowX robot evals
-- [2024-07-08] Added new sections: [Fine-Tuning OpenVLA via LoRA](#fine-tuning-openvla-via-lora), [Fully Fine-Tuning OpenVLA](#fully-fine-tuning-openvla)
-- [2024-06-13] Initial release
-
-<hr style="border: 2px solid gray;"></hr>
-
-A simple and scalable codebase for training and fine-tuning vision-language-action models (VLAs) for generalist robotic 
-manipulation:
-
-- **Different Dataset Mixtures**: We natively support arbitrary datasets in RLDS format, including arbitrary mixtures of
-  data from the [Open X-Embodiment Dataset](https://robotics-transformer-x.github.io/).
-- **Easy Scaling**: Powered by PyTorch FSDP and Flash-Attention, we can quickly and efficiently train models from 1B - 
-  34B parameters, with easily adaptable model architectures.
-- **Native Fine-Tuning Support**: Built-in support (with examples) for various forms of fine-tuning (full, 
-  partial, LoRA).
-
-Built on top of [Prismatic VLMs](https://github.com/TRI-ML/prismatic-vlms).
-
-## Getting Started
-
-To get started with loading and running OpenVLA models for inference, we provide a lightweight interface that leverages
-HuggingFace `transformers` AutoClasses, with minimal dependencies.
-
-For example, to load `openvla-7b` for zero-shot instruction following in the
-[BridgeData V2 environments](https://rail-berkeley.github.io/bridgedata/) with a WidowX robot:
-
-```python
-# Install minimal dependencies (`torch`, `transformers`, `timm`, `tokenizers`, ...)
-# > pip install -r https://raw.githubusercontent.com/openvla/openvla/main/requirements-min.txt
-from transformers import AutoModelForVision2Seq, AutoProcessor
-from PIL import Image
-
-import torch
-
-# Load Processor & VLA
-processor = AutoProcessor.from_pretrained("openvla/openvla-7b", trust_remote_code=True)
-vla = AutoModelForVision2Seq.from_pretrained(
-    "openvla/openvla-7b", 
-    attn_implementation="flash_attention_2",  # [Optional] Requires `flash_attn`
-    torch_dtype=torch.bfloat16, 
-    low_cpu_mem_usage=True, 
-    trust_remote_code=True
-).to("cuda:0")
-
-# Grab image input & format prompt
-image: Image.Image = get_from_camera(...)
-prompt = "In: What action should the robot take to {<INSTRUCTION>}?\nOut:"
-
-# Predict Action (7-DoF; un-normalize for BridgeData V2)
-inputs = processor(prompt, image).to("cuda:0", dtype=torch.bfloat16)
-action = vla.predict_action(**inputs, unnorm_key="bridge_orig", do_sample=False)
-
-# Execute...
-robot.act(action, ...)
-```
-
-We also provide an [example script for fine-tuning OpenVLA models for new tasks and 
-embodiments](./vla-scripts/finetune.py); this script supports different fine-tuning modes -- including (quantized) 
-low-rank adaptation (LoRA) supported by [HuggingFace's PEFT library](https://huggingface.co/docs/peft/en/index). 
-
-For deployment, we provide a lightweight script for [serving OpenVLA models over a REST API](./vla-scripts/deploy.py), 
-providing an easy way to integrate OpenVLA models into existing robot control stacks, 
-removing any requirement for powerful on-device compute.
-
-## Pretrained VLAs
-
-We release two OpenVLA models trained as part of our work, with checkpoints, configs, and model cards available [on our
-HuggingFace page](https://huggingface.co/openvla):
-- [`openvla-7b`](https://huggingface.co/openvla/openvla-7b): The flagship model from our paper, trained from 
-  the Prismatic `prism-dinosiglip-224px` VLM (based on a fused DINOv2 and SigLIP vision backbone, and Llama-2 LLM). 
-  Trained on a large mixture of datasets from Open X-Embodiment spanning 970K trajectories 
-  ([mixture details - see "Open-X Magic Soup++"](./prismatic/vla/datasets/rlds/oxe/mixtures.py)).
-- [`openvla-v01-7b`](https://huggingface.co/openvla/openvla-7b-v01): An early model used during development, trained from
-  the Prismatic `siglip-224px` VLM (singular SigLIP vision backbone, and a Vicuña v1.5 LLM). Trained on the same mixture
-  of datasets as [Octo](https://github.com/octo-models/octo), but for significantly fewer GPU hours than our final model 
-  ([mixture details - see "Open-X Magic Soup"](./prismatic/vla/datasets/rlds/oxe/mixtures.py)).
-
-**Explicit Notes on Model Licensing & Commercial Use**: While all code in this repository is released under an MIT 
-License, our pretrained models may inherit restrictions from the underlying base models we use. Specifically, both the
-above models are derived from Llama-2, and as such are subject to the 
-[Llama Community License](https://ai.meta.com/llama/license/).
+# OpenVLA 在 Ubuntu 20.04 + RTX A5000 上的完整部署与复现
+  
+内容基于官方 OpenVLA/LIBERO 文档，并结合本机复现部署过程整理而成。
 
 ---
 
-## Installation
+## 1. 复现目标与范围
 
-> **Note**: These installation instructions are for full-scale pretraining (and distributed fine-tuning); if looking to
-  just run inference with OpenVLA models (or perform lightweight fine-tuning), see instructions above!
+### 1.1 数据集
 
-This repository was built using Python 3.10, but should be backwards compatible with any Python >= 3.8. We require
-PyTorch 2.2.* -- installation instructions [can be found here](https://pytorch.org/get-started/locally/). The latest 
-version of this repository was developed and thoroughly tested with:
-  - PyTorch 2.2.0, torchvision 0.17.0, transformers 4.40.1, tokenizers 0.19.1, timm 0.9.10, and flash-attn 2.5.5
+1. 在本地单机 GPU 上成功加载 OpenVLA 模型并推理。
+2. 按官方方式，在 LIBERO 四个任务套件上运行评测脚本复现：
+   - `LIBERO-Spatial`
+   - `LIBERO-Object`
+   - `LIBERO-Goal`
+   - `LIBERO-10`
 
-**[5/21/24] Note**: Following reported regressions and breaking changes in later versions of `transformers`, `timm`, and
-`tokenizers` we explicitly pin the above versions of the dependencies. We are working on implementing thorough tests, 
-and plan on relaxing these constraints as soon as we can.
+### 1.2 具体过程
 
-Use the setup commands below to get started:
+1. 系统与硬件检查
+2. Conda 环境与依赖安装
+3. OpenVLA 与 LIBERO 仓库准备
+4. 权重与数据下载（含断点续传、代理、报错补救）
+5. 官方评测命令（smoke test + full eval）
+6. 推理结果读取方法
+7. 常见错误与修复
+8. 模型架构与每一步操作作用解释
+
+---
+
+## 2. 机器配置（本机实测）
+
+### 2.1 操作系统与内核
+
+- Ubuntu 20.04.6 LTS
+- Kernel: `5.15.0-139-generic`
+
+### 2.2 GPU 与驱动
+
+- GPU: `NVIDIA RTX A5000`（24GB 显存）
+- Driver: `535.183.01`
+- `nvidia-smi` 显示 CUDA Runtime: `12.2`
+
+### 2.3 复现环境版本（建议保持一致）
+
+- Python: `3.10.20`
+- PyTorch: `2.2.0+cu121`
+- transformers: `4.40.1`
+- tokenizers: `0.19.1`
+- timm: `0.9.10`
+- flash-attn: `2.5.5`
+- tensorflow: `2.15.0`
+- tensorflow_datasets: `4.9.3`
+- mujoco: `3.1.6`
+- robosuite: `1.4.1`
+
+> 这些版本组合是当前已验证可跑通的组合。OpenVLA 对版本比较敏感，特别是 `torch / transformers / flash-attn / numpy`。
+
+---
+
+## 3. 目录规划（建议）
+
+建议统一工作根目录：
 
 ```bash
-# Create and activate conda environment
-conda create -n openvla python=3.10 -y
-conda activate openvla
+export WORK_ROOT=/mnt/data/home/yqy/YANGCHENX/openvla_sim
+export OPENVLA_REPO=$WORK_ROOT/openvla
+export LIBERO_ROOT=$WORK_ROOT/LIBERO
+export OPENVLA_PY=/mnt/data/home/yqy/miniforge3/envs/openvla/bin/python
+export HF_HOME=$WORK_ROOT/.hf_cache
+```
 
-# Install PyTorch. Below is a sample command to do this, but you should check the following link
-# to find installation instructions that are specific to your compute platform:
-# https://pytorch.org/get-started/locally/
-conda install pytorch torchvision torchaudio pytorch-cuda=12.4 -c pytorch -c nvidia -y  # UPDATE ME!
+建议目录结构：
 
-# Clone and install the openvla repo
+```text
+openvla_sim/
+├── openvla/                      # OpenVLA 主仓库
+├── LIBERO/                       # LIBERO 仓库
+├── models/                       # 本地模型权重
+│   ├── openvla-7b/
+│   ├── openvla-7b-finetuned-libero-spatial/
+│   ├── openvla-7b-finetuned-libero-object/
+│   ├── openvla-7b-finetuned-libero-goal/
+│   └── openvla-7b-finetuned-libero-10/
+└── .hf_cache/                    # HuggingFace 下载缓存
+```
+---
+
+## 4. 从零安装环境
+
+### 4.1 克隆 OpenVLA
+
+```bash
+mkdir -p $WORK_ROOT
+cd $WORK_ROOT
 git clone https://github.com/openvla/openvla.git
-cd openvla
-pip install -e .
-
-# Install Flash Attention 2 for training (https://github.com/Dao-AILab/flash-attention)
-#   =>> If you run into difficulty, try `pip cache remove flash_attn` first
-pip install packaging ninja
-ninja --version; echo $?  # Verify Ninja --> should return exit code "0"
-pip install "flash-attn==2.5.5" --no-build-isolation
 ```
 
-If you run into any problems during the installation process, please file a GitHub Issue.
-
-**Note:** See `vla-scripts/` for full training and verification scripts for OpenVLA models. Note that `scripts/` is
-mostly a holdover from the original (base) `prismatic-vlms` repository, with support for training and evaluating
-visually-conditioned language models; while you can use this repo to train VLMs AND VLAs, note that trying to generate
-language (via `scripts/generate.py`) with existing OpenVLA models will not work (as we only train current OpenVLA models
-to generate actions, and actions alone).
-
-## Fine-Tuning OpenVLA via LoRA
-
-**(2025-03-03 Update: We recommend trying the new OFT recipe for fine-tuning OpenVLA to produce faster and more successful policies. See project website [here](https://openvla-oft.github.io/).)**
-
-In this section, we discuss fine-tuning OpenVLA using Low-Rank Adaptation (LoRA) via the Hugging Face `transformers` library,
-which is recommended if you do not have sufficient compute to fully fine-tune a 7B-parameter model. The main script for LoRA
-fine-tuning is `vla-scripts/finetune.py`. (If you instead wish to do full fine-tuning, please see the
-[Fully Fine-Tuning OpenVLA](#fully-fine-tuning-openvla) section.)
-
-Below we show an example of how you can fine-tune the main OpenVLA checkpoint ([`openvla-7b`](https://huggingface.co/openvla/openvla-7b))
-via LoRA. Here we fine-tune on [BridgeData V2](https://rail-berkeley.github.io/bridgedata/) using a single A100
-GPU with 80 GB VRAM. (You can also fine-tune with a smaller GPU, as long as it has at least ~27 GB of memory,
-by modifying the batch size.)
-
-First, download the BridgeData V2 dataset:
+### 4.2 创建 Conda 环境
 
 ```bash
-# Change directory to your base datasets folder
-cd <PATH TO BASE DATASETS DIR>
-
-# Download the full dataset (124 GB)
-wget -r -nH --cut-dirs=4 --reject="index.html*" https://rail.eecs.berkeley.edu/datasets/bridge_release/data/tfds/bridge_dataset/
-
-# Rename the dataset to `bridge_orig` (NOTE: Omitting this step may lead to runtime errors later)
-mv bridge_dataset bridge_orig
+conda create -n openvla python=3.10 -y
 ```
 
-Now, launch the LoRA fine-tuning script, as shown below. Note that `--batch_size==16` with `--grad_accumulation_steps==1`
-requires ~72 GB GPU memory. If you have a smaller GPU, you should reduce `--batch_size` and increase `--grad_accumulation_steps`
-to maintain an effective batch size that is large enough for stable training. If you have multiple GPUs and wish to train via
-PyTorch Distributed Data Parallel (DDP), simply set `--nproc-per-node` in the `torchrun` command below to the number of available GPUs.
+### 4.3 安装核心推理依赖（GPU）
 
 ```bash
-torchrun --standalone --nnodes 1 --nproc-per-node 1 vla-scripts/finetune.py \
-  --vla_path "openvla/openvla-7b" \
-  --data_root_dir <PATH TO BASE DATASETS DIR> \
-  --dataset_name bridge_orig \
-  --run_root_dir <PATH TO LOG/CHECKPOINT DIR> \
-  --adapter_tmp_dir <PATH TO TEMPORARY DIR TO SAVE ADAPTER WEIGHTS> \
-  --lora_rank 32 \
-  --batch_size 16 \
-  --grad_accumulation_steps 1 \
-  --learning_rate 5e-4 \
-  --image_aug <True or False> \
-  --wandb_project <PROJECT> \
-  --wandb_entity <ENTITY> \
-  --save_steps <NUMBER OF GRADIENT STEPS PER CHECKPOINT SAVE>
+conda run -n openvla pip install torch==2.2.0 torchvision==0.17.0 torchaudio==2.2.0 --index-url https://download.pytorch.org/whl/cu121
+conda run -n openvla pip install "numpy<2"
+cd $OPENVLA_REPO
+conda run -n openvla pip install -r requirements-min.txt
+conda run -n openvla pip install draccus==0.8.0 json-numpy fastapi uvicorn pillow accelerate==0.30.1 peft==0.11.1 einops sentencepiece==0.1.99
+conda run -n openvla pip install packaging ninja
+conda run -n openvla pip install "https://github.com/Dao-AILab/flash-attention/releases/download/v2.5.5/flash_attn-2.5.5+cu122torch2.2cxx11abiFALSE-cp310-cp310-linux_x86_64.whl"
+cd $OPENVLA_REPO
+conda run -n openvla pip install -e . --no-deps
 ```
+  
+> - `torch + cu121`：确保 GPU 计算可用。  
+> - `requirements-min.txt`：最小推理依赖。  
+> - `flash-attn`：降低显存占用并加速推理。  
+> - `pip install -e .`：把当前仓库作为可编辑包安装，脚本可直接调用内部模块。
 
-Note: If you set `--image_aug==False` in the command above, you will observe nearly 100% `action_accuracy` in the training logs,
-since the [`openvla-7b`](https://huggingface.co/openvla/openvla-7b) model is already pretrained (without augmentations) on a
-superset of datasets that includes BridgeData V2.
-
-To LoRA fine-tune on a different dataset, you can download the dataset from the [Open X-Embodiment (OXE)](https://robotics-transformer-x.github.io/)
-mixture (see [this custom script](https://github.com/moojink/rlds_dataset_mod/blob/main/prepare_open_x.sh) for an example of how to download datasets
-from OXE). Alternatively, if you have a custom dataset that is not part of OXE, you can either (a) convert the dataset to the RLDS format which is
-compatible with our fine-tuning script (see [this repo](https://github.com/kpertsch/rlds_dataset_builder) for instructions on this), or (b) use your own
-custom PyTorch Dataset wrapper (see comments in `vla-scripts/finetune.py` for instructions). We recommend option (a) for most users; the RLDS dataset and
-dataloader are tested more extensively since we used these for all of our pretraining and fine-tuning experiments.
-
-For option (a), after you converted your dataset to RLDS, you need to register it with our data loader, by registering a dataset
-config [here](prismatic/vla/datasets/rlds/oxe/configs.py#L54) and a dataset transform function [here](prismatic/vla/datasets/rlds/oxe/transforms.py#L828).
-
-Once you have integrated your new dataset, you can launch LoRA fine-tuning with the same `vla-scripts/finetune.py` script above. If you run into any issues,
-please visit the [VLA Troubleshooting](#vla-troubleshooting) section or search for a similar issue in the [OpenVLA GitHub Issues page](https://github.com/openvla/openvla/issues?q=)
-(including "Closed" issues). If you cannot find a similar issue there, feel free to create a new issue.
-
-## Fully Fine-Tuning OpenVLA
-
-**(2025-03-03 Update: We recommend trying the new OFT recipe for fine-tuning OpenVLA to produce faster and more successful policies. See project website [here](https://openvla-oft.github.io/).)**
-
-In this section, we discuss <ins>fully fine-tuning</ins> OpenVLA (all 7.5 billion parameters) via native PyTorch Fully Sharded Data Parallel (FSDP)
-using the [Prismatic VLMs](https://github.com/TRI-ML/prismatic-vlms) training script. Full fine-tuning is more advanced/involved and is only recommended
-if you have sufficient compute (e.g., a full node of 8 A100 GPUs) and if LoRA fine-tuning is insufficient for your use case (e.g., if the fine-tuning distribution
-varies drastically from the pretraining distribution). Otherwise, we recommend that you try parameter-efficient fine-tuning via LoRA, which is described in the 
-[Fine-Tuning OpenVLA via LoRA](#fine-tuning-openvla-via-lora) section.
-
-For full fine-tuning, you will need to download [a different version of the OpenVLA model checkpoint](https://huggingface.co/openvla/openvla-7b-prismatic) that is compatible
-with the Prismatic VLMs codebase, which we built on top of to develop the OpenVLA model. You can download this Prismatic-compatible OpenVLA checkpoint using the git commands below
-(alternatively, you can download via the [Hugging Face CLI](https://huggingface.co/docs/huggingface_hub/main/en/guides/cli)):
+### 4.4 检查 GPU 与 Python 环境是否正常
 
 ```bash
-# Change directory to your base model checkpoints folder
-cd <PATH TO BASE MODEL CHECKPOINTS DIR>
-
-# Download checkpoint (30 GB) -- may take a few minutes
-git clone git@hf.co:openvla/openvla-7b-prismatic
-
-# If the command above did not download the full checkpoint,
-# manually fetch it via git Large File Storage (LFS)
-# Note: You may have to configure an SSH key for this to work
-cd openvla-7b-prismatic
-git lfs fetch --all
+nvidia-smi
+conda run -n openvla python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 ```
-
-We show how you can fully fine-tune OpenVLA on [BridgeData V2](https://rail-berkeley.github.io/bridgedata/) using a single node with 8 GPUs. If you wish to
-use a different number of GPUs (or nodes), you can modify the VLA training configuration in [`prismatic/conf/vla.py`](prismatic/conf/vla.py).
-
-Download the BridgeData V2 dataset:
-
-```bash
-# Change directory to your base datasets folder
-cd <PATH TO BASE DATASETS DIR>
-
-# Download the full dataset (124 GB)
-wget -r -nH --cut-dirs=4 --reject="index.html*" https://rail.eecs.berkeley.edu/datasets/bridge_release/data/tfds/bridge_dataset/
-
-# Rename the dataset to `bridge_orig` (NOTE: Omitting this step may lead to runtime errors later)
-mv bridge_dataset bridge_orig
-```
-
-Next, create a [Hugging Face user access token](https://huggingface.co/docs/hub/en/security-tokens) and copy the token value (a string that starts with
-`hf_...`) into a file named `.hf_token` at the root directory of this repo (`openvla/.hf_token`).
-
-```bash
-# Go to openvla root directory
-cd openvla
-
-# Copy HF token value into token file. Replace "hf_..." with your own token value!
-# See: https://huggingface.co/docs/hub/en/security-tokens
-echo hf_... >>> .hf_token
-```
-
-Now, launch the training script. If you wish to use a different number of nodes or GPUs, modify the VLA training configuration in
-[`prismatic/conf/vla.py`](prismatic/conf/vla.py) and then change the `--nnodes` and `--nproc-per-node` arguments below accordingly.
-
-```bash
-torchrun --standalone --nnodes 1 --nproc-per-node 8 vla-scripts/train.py \
-  --pretrained_checkpoint <PATH TO openvla/openvla-7b-prismatic CHECKPOINT FILE: step-295000-epoch-40-loss=0.2200.pt> \
-  --vla.type prism-dinosiglip-224px+mx-bridge \
-  --data_root_dir <PATH TO BASE DATASETS DIR> \
-  --run_root_dir <PATH TO LOG/CHECKPOINT DIR> \
-  --run_id <OPTIONAL RUN ID FOR WANDB LOGGING> \
-  --image_aug <True or False> \
-  --wandb_project <PROJECT> \
-  --wandb_entity <ENTITY> \
-  --save_interval <NUMBER OF GRADIENT STEPS PER CHECKPOINT SAVE> \
-  --is_resume False
-```
-
-Note that the `--is_resume` argument is set to `False` above since we are fine-tuning a pretrained checkpoint rather than resuming a paused training run.
-
-If your training run gets paused and you wish to resume from the latest checkpoint, change `--pretrained_checkpoint` to the latest checkpoint path,
-and then set `--is_resume==True` and specify `--resume_step` and `--resume_epoch` as the step and epoch number, respectively. For example, if you wish to
-resume training from a checkpoint named `step-010000-epoch-20-loss=0.0160.pt`, you would set `is_resume==True`, `resume_step==10000`, and `resume_epoch==20`.
-
-Note: If you run the BridgeData V2 fine-tuning command above, you should observe nearly 100% Action Token Accuracy in the training logs, since the
-[`openvla-7b`](https://huggingface.co/openvla/openvla-7b) model is already pretrained on a superset of datasets that includes BridgeData V2.
-
-To fully fine-tune OpenVLA on a different dataset, you can download the dataset from the [Open X-Embodiment (OXE)](https://robotics-transformer-x.github.io/)
-mixture (see [this custom script](https://github.com/moojink/rlds_dataset_mod/blob/main/prepare_open_x.sh) for an example of how to download datasets from OXE).
-Alternatively, if you have a custom dataset that is not part of OXE, you can convert the dataset to the RLDS format, which is compatible with our fine-tuning script
-(see [this repo](https://github.com/kpertsch/rlds_dataset_builder) for instructions on this). After downloading/converting the dataset, you will need to modify the following files:
-
-* [`prismatic/conf/vla.py`](prismatic/conf/vla.py): Add a new training configuration by creating an experiment class, and then register it in the `VLARegistry` at the bottom of the file.
-  * Make sure to create a new unique `vla_id` for your fine-tuning run, and adjust some configuration variables as needed – e.g., `expected_world_size` (number of GPUs),
-  `per_device_batch_size` (batch size per GPU), `global_batch_size` (total batch size), `shuffle_buffer_size` (number of samples in shuffle buffer per GPU), etc. See comments
-  under the `VLAConfig` class at the top of the file to understand the purpose of each variable.
-* [`prismatic/vla/datasets/rlds/oxe/mixtures.py`](prismatic/vla/datasets/rlds/oxe/mixtures.py): Define a new mixture for your fine-tuning mixture in the `OXE_NAMED_MIXTURES` dictionary.
-* [`prismatic/vla/datasets/rlds/oxe/transforms.py`](prismatic/vla/datasets/rlds/oxe/transforms.py): Define a new dataset transform function for your fine-tuning dataset, and add it to the
-`OXE_STANDARDIZATION_TRANSFORMS` registry at the bottom of the file.
-* [`prismatic/vla/datasets/rlds/oxe/configs.py`](prismatic/vla/datasets/rlds/oxe/configs.py): Add a new configuration specifying your fine-tuning dataset's observation and action spaces
-to the `OXE_DATASET_CONFIGS` dictionary.
-
-After completing the steps above, you can start full fine-tuning using the `vla-scripts/train.py` script. Make sure to set the `--vla.type` argument to the new `vla_id` that you added in `prismatic/conf/vla.py`.
-
-When you are finished with fine-tuning, you will need to convert the final model checkpoint to a version that is
-compatible with the Hugging Face `transformers` library. See the [Converting Prismatic Models to Hugging Face](#converting-prismatic-models-to-hugging-face) section for instructions.
-
-If you run into any issues, please visit the [VLA Troubleshooting](#vla-troubleshooting) section or search for a similar issue in the
-[OpenVLA GitHub Issues page](https://github.com/openvla/openvla/issues?q=) (including "Closed" issues). If you cannot find a similar issue there, feel free to create a new issue.
-
-### Converting Prismatic Models to Hugging Face
-
-If you have used the Prismatic VLMs codebase to train your model (e.g., if you did full fine-tuning of OpenVLA on a
-new dataset), you will need to convert the final checkpoint to a version that is compatible with Hugging Face
-`transformers` AutoClasses. We discuss how to do so in this section.
-
-Let's say your training run directory is `PRISMATIC_RUN_DIR` (e.g., `prism-dinosiglip-224px+mx-oxe-magic-soup-plus+n8+b32+x7`).
-Inside this directory, there should be a directory called `checkpoints` which contains saved model checkpoints (e.g.,
-`step-295000-epoch-40-loss=0.2200.pt`). The Prismatic-to-Hugging-Face conversion script
-([convert_openvla_weights_to_hf.py](vla-scripts/extern/convert_openvla_weights_to_hf.py)) expects a checkpoint file
-named `latest-checkpoint.pt`. Therefore, you should first create a symbolic link called `latest-checkpoint.pt` that
-points to the checkpoint file that you wish to convert:
-
-```bash
-# Go to your Prismatic training run's `checkpoints` directory
-cd PRISMATIC_RUN_DIR/checkpoints
-
-# Create symbolic link pointing to your checkpoint file
-ln -s <YOUR CHECKPOINT FILENAME> latest-checkpoint.pt
-```
-
-Then, launch the conversion script to convert the checkpoint from the Prismatic VLMs format to the Hugging Face format:
-
-```bash
-python vla-scripts/extern/convert_openvla_weights_to_hf.py \
-    --openvla_model_path_or_id <PRISMATIC_RUN_DIR> \
-    --output_hf_model_local_path <OUTPUT DIR FOR CONVERTED CHECKPOINT>
-```
-
-The command above will save the HF-compatible checkpoint in `output_hf_model_local_path`. Now you can load the checkpoint
-with HF AutoClasses as normal, as shown below. Note that there is an additional necessary step to register the OpenVLA model
-to HF AutoClasses before loading it because you are loading a locally saved checkpoint rather than one that is pushed to the
-HF Hub (see [here](https://huggingface.co/docs/transformers/en/custom_models#registering-a-model-with-custom-code-to-the-auto-classes)
-for details).
-
-```python
-import torch
-from transformers import AutoConfig, AutoImageProcessor, AutoModelForVision2Seq, AutoProcessor
-
-from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
-from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
-from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
-
-# Register OpenVLA model to HF AutoClasses (not needed if you pushed model to HF Hub)
-AutoConfig.register("openvla", OpenVLAConfig)
-AutoImageProcessor.register(OpenVLAConfig, PrismaticImageProcessor)
-AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
-AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
-
-# Load Processor & VLA
-processor = AutoProcessor.from_pretrained("<PATH TO CONVERTED CHECKPOINT DIR>", trust_remote_code=True)
-vla = AutoModelForVision2Seq.from_pretrained(
-    "<PATH TO CONVERTED CHECKPOINT DIR>",
-    attn_implementation="flash_attention_2",  # [Optional] Requires `flash_attn`
-    torch_dtype=torch.bfloat16,
-    low_cpu_mem_usage=True,
-    trust_remote_code=True,
-).to("cuda:0")
-
-...
-```
-
-## Training VLAs from Scratch
-
-We provide full instructions and configurations for training VLA models on (arbitrary subsets of) the
-[Open X-Embodiment (OXE) Dataset](https://robotics-transformer-x.github.io/). If you run in to any issues with 
-the following, see [VLA Troubleshooting](#vla-troubleshooting) below (or file a GitHub Issue).
-
-### VLA Pretraining Datasets
-
-We download and preprocess individual datasets from Open X-Embodiment in [RLDS format](https://github.com/google-research/rlds) following 
-[this custom script](https://github.com/moojink/rlds_dataset_mod/blob/main/prepare_open_x.sh). See 
-[mixtures.py](./prismatic/vla/datasets/rlds/oxe/mixtures.py) for the full list of component datasets (and mixture 
-weights) we use to train `openvla-7b`. 
-- **Important**: For the BridgeData V2 component, the version in OXE is out of date (as of 12/20/2023). Instead,
-  you should download the dataset from the [official website](https://rail.eecs.berkeley.edu/datasets/bridge_release/data/tfds/bridge_dataset/) and place it under the subdirectory `bridge_orig/`. 
-  Replace any reference to `bridge` in the OXE code with `bridge_orig`.
-
-### VLA Configuration & Training Script
-
-The entry point for VLA training is [`vla-scripts/train.py`](vla-scripts/train.py). We use 
-[`draccus`](https://pypi.org/project/draccus) to provide a modular, dataclass-based interface for specifying VLA 
-training configurations; existing VLA configurations are in [`prismatic/conf/vla.py`](prismatic/conf/vla.py). You can 
-add your own training configuration and refer to it using the `--vla.type` command line argument.
-
-We use PyTorch Fully Sharded Data Parallel (FSDP) to distribute training across GPUs. Launch training via `torchrun`:
-
-```bash
-# Train VLA on BridgeData V2 with the Prismatic DINO-SigLIP 224px Backbone on a Single Node (w/ 8 GPUs)
-torchrun --standalone --nnodes 1 --nproc-per-node 8 vla-scripts/train.py \
-  --vla.type "prism-dinosiglip-224px+mx-bridge" \
-  --data_root_dir <PATH TO OXE DATA ROOT> \
-  --run_root_dir <PATH TO LOG/CHECKPOINT ROOT> \
-  --wandb_project "<PROJECT>" \
-  --wandb_entity "<ENTITY>"
-```
-
-### VLA Troubleshooting
-
-The following are a list of known problems and corresponding fixes:
-
-```bash
-FileNotFoundError: Failed to construct dataset "fractal20220817_data", builder_kwargs "{'data_dir': '/path/to/processed/datasets/'}": Could not load dataset info from fractal20220817_data/0.1.0/dataset_info.json
-```
-- **Fix**: Downgrade `tensorflow-datasets` via `pip install tensorflow-datasets==4.9.3`.
-
-
-```bash
-AttributeError: 'DLataset' object has no attribute 'traj_map'. Did you mean: 'flat_map'?
-```
-- **Fix**: Upgrade `dlimp` to the newest version. You may have to `--force-reinstall` like so:
-`pip install --no-deps --force-reinstall git+https://github.com/moojink/dlimp_openvla`
 
 ---
 
-## Evaluating OpenVLA
+## 5. 安装 LIBERO 评测环境
 
-### BridgeData V2 WidowX Evaluations
-
-#### Setup
-
-Clone the [BridgeData V2 WidowX controller repo](https://github.com/rail-berkeley/bridge_data_robot) and install the `widowx_envs` package:
+### 5.1 克隆并安装 LIBERO
 
 ```bash
-git clone https://github.com/rail-berkeley/bridge_data_robot.git
-cd bridge_data_robot
-pip install -e widowx_envs
+git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git $LIBERO_ROOT
+cd $LIBERO_ROOT
+$OPENVLA_PY -m pip install -e . --config-settings editable_mode=compat
 ```
 
-Additionally, install the [`edgeml`](https://github.com/youliangtan/edgeml) library:
+### 5.2 安装 OpenVLA-LIBERO 额外依赖
+
 ```bash
-git clone https://github.com/youliangtan/edgeml.git
-cd edgeml
-pip install -e .
+cd $OPENVLA_REPO
+$OPENVLA_PY -m pip install -r experiments/robot/libero/libero_requirements.txt
+$OPENVLA_PY -m pip install wandb
+$OPENVLA_PY -m pip install jsonlines matplotlib rich tensorflow==2.15.0 tensorflow_datasets==4.9.3 tensorflow_graphics==2021.12.3 "dlimp @ git+https://github.com/moojink/dlimp_openvla"
+$OPENVLA_PY -m pip install "numpy<2" "opencv-python<4.12"
 ```
 
-Follow the instructions in the `bridge_data_robot` README to create the Bridge WidowX Docker container.
+> - `tensorflow_datasets==4.9.3` 与 `dlimp` 是已知兼容组合。  
+> - `numpy<2` 可规避一批旧依赖兼容问题。  
+> - `opencv-python<4.12` 避免和 numpy 版本冲突。
 
-#### Launching BridgeData V2 Evaluations
-
-There are multiple ways to run BridgeData V2 evaluations. We describe the server-client method below.
-
-In one Terminal window (e.g., in tmux), start the WidowX Docker container:
+### 5.3 初始化 LIBERO 配置文件（避免首次交互中断）
 
 ```bash
-cd bridge_data_robot
-./generate_usb_config.sh
-USB_CONNECTOR_CHART=$(pwd)/usb_connector_chart.yml docker compose up --build robonet
+mkdir -p /mnt/data/home/yqy/.libero
+cat > /mnt/data/home/yqy/.libero/config.yaml <<'YAML'
+benchmark_root: /mnt/data/home/yqy/YANGCHENX/openvla_sim/LIBERO/libero/libero
+bddl_files: /mnt/data/home/yqy/YANGCHENX/openvla_sim/LIBERO/libero/libero/./bddl_files
+init_states: /mnt/data/home/yqy/YANGCHENX/openvla_sim/LIBERO/libero/libero/./init_files
+datasets: /mnt/data/home/yqy/YANGCHENX/openvla_sim/LIBERO/libero/../datasets
+assets: /mnt/data/home/yqy/YANGCHENX/openvla_sim/LIBERO/libero/libero/./assets
+YAML
+mkdir -p /mnt/data/home/yqy/YANGCHENX/openvla_sim/LIBERO/datasets
 ```
 
-In a second Terminal window, run the WidowX robot server:
+> 作用说明：LIBERO 首次导入会询问路径；提前写好配置后，脚本可非交互运行。
+
+---
+
+## 6. 模型权重下载（官方 checkpoint）
+
+### 6.1 需要下载哪些权重
+
+1. 基础模型（可选但推荐）：`openvla/openvla-7b`
+2. LIBERO 四个官方微调模型（复现核心）：
+   - `openvla/openvla-7b-finetuned-libero-spatial`
+   - `openvla/openvla-7b-finetuned-libero-object`
+   - `openvla/openvla-7b-finetuned-libero-goal`
+   - `openvla/openvla-7b-finetuned-libero-10`
+
+### 6.2 下载前建议环境变量
 
 ```bash
-cd bridge_data_robot
-docker compose exec robonet bash -lic "widowx_env_service --server"
+export WORK_ROOT=/mnt/data/home/yqy/YANGCHENX/openvla_sim
+export HF_HOME=$WORK_ROOT/.hf_cache
+export HF_HUB_DISABLE_XET=1
+export HF_HUB_ENABLE_HF_TRANSFER=0
 ```
 
-In a third Terminal window, run the OpenVLA policy evaluation script:
+如果走代理，另外加上：
 
 ```bash
-cd openvla
-python experiments/robot/bridge/run_bridgev2_eval.py \
+export HTTP_PROXY=http://127.0.0.1:7897
+export HTTPS_PROXY=http://127.0.0.1:7897
+export http_proxy=$HTTP_PROXY
+export https_proxy=$HTTPS_PROXY
+```
+
+> - `HF_HUB_ENABLE_HF_TRANSFER=0`：下载失败时错误信息更清晰，且常比 hf_transfer 稳。  
+> - `HF_HUB_DISABLE_XET=1`：避免部分网络环境对 xet/cas 链路不稳定。
+
+### 6.3 下载命令（逐个执行，支持断点续传）
+
+```bash
+mkdir -p $WORK_ROOT/models
+
+/mnt/data/home/yqy/miniforge3/envs/openvla/bin/huggingface-cli download openvla/openvla-7b --local-dir $WORK_ROOT/models/openvla-7b
+/mnt/data/home/yqy/miniforge3/envs/openvla/bin/huggingface-cli download openvla/openvla-7b-finetuned-libero-spatial --local-dir $WORK_ROOT/models/openvla-7b-finetuned-libero-spatial
+/mnt/data/home/yqy/miniforge3/envs/openvla/bin/huggingface-cli download openvla/openvla-7b-finetuned-libero-object --local-dir $WORK_ROOT/models/openvla-7b-finetuned-libero-object
+/mnt/data/home/yqy/miniforge3/envs/openvla/bin/huggingface-cli download openvla/openvla-7b-finetuned-libero-goal --local-dir $WORK_ROOT/models/openvla-7b-finetuned-libero-goal
+/mnt/data/home/yqy/miniforge3/envs/openvla/bin/huggingface-cli download openvla/openvla-7b-finetuned-libero-10 --local-dir $WORK_ROOT/models/openvla-7b-finetuned-libero-10
+```
+
+> 说明：如果你的环境没有 `hf` 命令，用 `huggingface-cli` 是正常的。
+
+### 6.4 如何判断权重是否下载完整
+
+检查某个 checkpoint 是否具备全部分片和索引文件：
+
+```bash
+ls -lh $WORK_ROOT/models/openvla-7b-finetuned-libero-spatial/model-0000*-of-00004.safetensors
+ls -lh $WORK_ROOT/models/openvla-7b-finetuned-libero-spatial/model.safetensors.index.json
+```
+
+如果 4 个分片 + `model.safetensors.index.json` 都存在，通常即可本地加载。
+
+---
+
+## 7. 官方复现命令（LIBERO）
+
+### 7.1 先做最小 smoke test
+
+```bash
+cd $OPENVLA_REPO
+export HF_HOME=$WORK_ROOT/.hf_cache
+$OPENVLA_PY experiments/robot/libero/run_libero_eval.py \
   --model_family openvla \
-  --pretrained_checkpoint openvla/openvla-7b
+  --pretrained_checkpoint $WORK_ROOT/models/openvla-7b-finetuned-libero-spatial \
+  --task_suite_name libero_spatial \
+  --center_crop True \
+  --num_trials_per_task 1 \
+  --use_wandb False \
+  --seed 7 \
+  --run_id_note smoke_spatial
 ```
 
-If you run into an error such as `ModuleNotFoundError: No module named 'moviepy.editor'`, you can work around it by fixing the
-moviepy version to an older version, v1.0.3, in the bridge_data_robot repo's requirements.txt file
-[here](https://github.com/rail-berkeley/bridge_data_robot/blob/main/widowx_envs/requirements.txt). I.e., simply replace `moviepy`
-with `moviepy==1.0.3` in the requirements.txt file. Then, go back to the first step above and restart the WidowX Docker container;
-it should be rebuilt with the older moviepy version.
+> 先验证链路无误（模型加载、环境创建、动作推理、视频保存）再跑 500 次完整评测。
 
+### 7.2 四套任务的正式复现
 
-### LIBERO Simulation Benchmark Evaluations
-
-In the [updated OpenVLA paper (v2)](https://arxiv.org/abs/2406.09246), we discuss fine-tuning OpenVLA
-on a simulated benchmark, [LIBERO](https://libero-project.github.io/main.html), in Appendix E.
-Please see the paper for details, such as how we modify the provided demonstration datasets to
-improve the overall performance of all methods.
-
-We copy the results to the section below and then discuss how to reproduce the results for OpenVLA.
-
-#### OpenVLA Fine-Tuning Results
-
-| Method | LIBERO-Spatial | LIBERO-Object | LIBERO-Goal | LIBERO-Long | Average |
-|--------|----------------|---------------|-------------|-------------|---------|
-| Diffusion Policy from scratch | 78.3 ± 1.1% | **92.5 ± 0.7%** | 68.3 ± 1.2% | 50.5 ± 1.3% | 72.4 ± 0.7% |
-| Octo fine-tuned | 78.9 ± 1.0% | 85.7 ± 0.9% | **84.6 ± 0.9%** | 51.1 ± 1.3% | 75.1 ± 0.6% |
-| OpenVLA fine-tuned (ours) | **84.7 ± 0.9%** | 88.4 ± 0.8% | 79.2 ± 1.0% | **53.7 ± 1.3%** | **76.5 ± 0.6%** |
-
-Each success rate is the average over 3 random seeds x 500 rollouts each (10 tasks x 50 rollouts per task).
-
-#### LIBERO Setup
-
-Clone and install the [LIBERO repo](https://github.com/Lifelong-Robot-Learning/LIBERO):
+#### LIBERO-Spatial
 
 ```bash
-git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git
-cd LIBERO
-pip install -e .
-```
-
-Additionally, install other required packages:
-```bash
-cd openvla
-pip install -r experiments/robot/libero/libero_requirements.txt
-```
-
-(Optional) To download the modified versions of the LIBERO datasets that we used in our fine-tuning
-experiments, run the command below. This will download the LIBERO-Spatial, LIBERO-Object, LIBERO-Goal,
-and LIBERO-10 datasets in RLDS data format (~10 GB total). You can use these to fine-tune OpenVLA or
-train other methods. This step is optional since we provide pretrained OpenVLA checkpoints below.
-(Also, you can find the script we used to generate the modified datasets in raw HDF5 format
-[here](experiments/robot/libero/regenerate_libero_dataset.py) and the code we used to convert these
-datasets to the RLDS format [here](https://github.com/moojink/rlds_dataset_builder).)
-```bash
-git clone git@hf.co:datasets/openvla/modified_libero_rlds
-```
-
-#### Launching LIBERO Evaluations
-
-We fine-tuned OpenVLA via LoRA (r=32) on four LIBERO task suites independently: LIBERO-Spatial, LIBERO-Object, LIBERO-Goal, and LIBERO-10 (also called LIBERO-Long).
-The four checkpoints are available on Hugging Face:
-* [openvla/openvla-7b-finetuned-libero-spatial](https://huggingface.co/openvla/openvla-7b-finetuned-libero-spatial)
-* [openvla/openvla-7b-finetuned-libero-object](https://huggingface.co/openvla/openvla-7b-finetuned-libero-object)
-* [openvla/openvla-7b-finetuned-libero-goal](https://huggingface.co/openvla/openvla-7b-finetuned-libero-goal)
-* [openvla/openvla-7b-finetuned-libero-10](https://huggingface.co/openvla/openvla-7b-finetuned-libero-10)
-
-To start evaluation with one of these checkpoints, run one of the commands below. Each will automatically download the appropriate checkpoint listed above.
-
-```bash
-# Launch LIBERO-Spatial evals
-python experiments/robot/libero/run_libero_eval.py \
+cd $OPENVLA_REPO
+$OPENVLA_PY experiments/robot/libero/run_libero_eval.py \
   --model_family openvla \
-  --pretrained_checkpoint openvla/openvla-7b-finetuned-libero-spatial \
+  --pretrained_checkpoint $WORK_ROOT/models/openvla-7b-finetuned-libero-spatial \
   --task_suite_name libero_spatial \
   --center_crop True
+```
 
-# Launch LIBERO-Object evals
-python experiments/robot/libero/run_libero_eval.py \
+#### LIBERO-Object
+
+```bash
+cd $OPENVLA_REPO
+$OPENVLA_PY experiments/robot/libero/run_libero_eval.py \
   --model_family openvla \
-  --pretrained_checkpoint openvla/openvla-7b-finetuned-libero-object \
+  --pretrained_checkpoint $WORK_ROOT/models/openvla-7b-finetuned-libero-object \
   --task_suite_name libero_object \
   --center_crop True
+```
 
-# Launch LIBERO-Goal evals
-python experiments/robot/libero/run_libero_eval.py \
+#### LIBERO-Goal
+
+```bash
+cd $OPENVLA_REPO
+$OPENVLA_PY experiments/robot/libero/run_libero_eval.py \
   --model_family openvla \
-  --pretrained_checkpoint openvla/openvla-7b-finetuned-libero-goal \
+  --pretrained_checkpoint $WORK_ROOT/models/openvla-7b-finetuned-libero-goal \
   --task_suite_name libero_goal \
   --center_crop True
+```
 
-# Launch LIBERO-10 (LIBERO-Long) evals
-python experiments/robot/libero/run_libero_eval.py \
+#### LIBERO-10（LIBERO-Long）
+
+```bash
+cd $OPENVLA_REPO
+$OPENVLA_PY experiments/robot/libero/run_libero_eval.py \
   --model_family openvla \
-  --pretrained_checkpoint openvla/openvla-7b-finetuned-libero-10 \
+  --pretrained_checkpoint $WORK_ROOT/models/openvla-7b-finetuned-libero-10 \
   --task_suite_name libero_10 \
   --center_crop True
 ```
 
-Notes:
-* The evaluation script will run 500 trials by default (10 tasks x 50 episodes each). You can modify the number of
-  trials per task by setting `--num_trials_per_task`. You can also change the random seed via `--seed`.
-* **NOTE: Setting `--center_crop True` is important** because we fine-tuned OpenVLA with random crop augmentations
-  (we took a random crop with 90% area in every training sample, so at test time we simply take the center 90% crop).
-* The evaluation script logs results locally. You can also log results in Weights & Biases
-  by setting `--use_wandb True` and specifying `--wandb_project <PROJECT>` and `--wandb_entity <ENTITY>`.
-* The results reported in our paper were obtained using **Python 3.10.13, PyTorch 2.2.0, transformers 4.40.1, and
-  flash-attn 2.5.5** on an **NVIDIA A100 GPU**, averaged over three random seeds. Please stick to these package versions.
-  Note that results may vary slightly if you use a different GPU for evaluation due to GPU nondeterminism in large models
-  (though we have tested that results were consistent across different machines with A100 GPUs).
-
-Please file a GitHub Issue if you run into any problems.
+> 作用说明：  
+> - `--center_crop True` 非常重要，官方 LIBERO 微调时使用过随机裁剪增强，推理时要做中心裁剪对齐分布。  
+> - 默认 `10 tasks x 50 episodes = 500` 次 rollout，耗时较长。
 
 ---
 
-## Repository Structure
+## 8. 推理过程中每一步在做什么
 
-High-level overview of repository/project file-tree:
+下面对应 `experiments/robot/libero/run_libero_eval.py` 的主流程：
 
-+ `prismatic` - Package source; provides core utilities for model loading, training, data preprocessing, etc.
-+ `vla-scripts/` - Core scripts for training, fine-tuning, and deploying VLAs.
-+ `experiments/` - Code for evaluating OpenVLA policies in robot environments.
-+ `LICENSE` - All code is made available under the MIT License; happy hacking!
-+ `Makefile` - Top-level Makefile (by default, supports linting - checking & auto-fix); extend as needed.
-+ `pyproject.toml` - Full project configuration details (including dependencies), as well as tool configurations.
-+ `README.md` - You are here!
+1. 读取配置与随机种子  
+   作用：保证实验可复现（同一 seed 下结果波动更可控）。
+
+2. 加载 OpenVLA 模型和 Processor  
+   作用：把图像+文本 prompt 编码成模型输入，再生成动作 token。
+
+3. 根据任务套件设置 `unnorm_key`  
+   作用：把模型输出的归一化动作反归一化回该任务数据分布范围。
+
+4. 初始化 LIBERO 环境与任务描述  
+   作用：逐任务进行模拟，任务文本会注入提示词中。
+
+5. 每回合开始先空转若干步（`num_steps_wait`）  
+   作用：等待环境中物体稳定下落，减少初始抖动影响。
+
+6. 取图像，必要时做中心裁剪，拼接 prompt  
+   作用：让输入分布接近训练时分布，提高成功率。
+
+7. `predict_action()` 输出 7 维动作  
+   作用：得到末端位姿增量+夹爪开合控制。
+
+8. 夹爪动作规范化 + 符号翻转  
+   作用：适配 LIBERO 环境动作定义，避免“动作看似合理但执行方向反了”。
+
+9. 环境 `step(action)` 执行并判断 done/success  
+   作用：产生奖励、终止信号与下一帧观测。
+
+10. 保存回放视频与日志  
+    作用：便于可视化审查失败样本和统计汇报。
 
 ---
 
+## 9. 模型架构
 
-# VLA Performance Troubleshooting
+### 9.1 OpenVLA
 
-In this section we cover best practices for debugging poor VLA performance after fine-tuning on your target domain robot dataset.
+OpenVLA 是 Vision-Language-Action（视觉-语言-动作）模型。  
+它把“图像 + 指令文本”映射成“机器人动作”。
 
-**Note**: OpenVLA typically requires fine-tuning on a small demonstration dataset (~100 demos) from your target domain robot. Out-of-the-box, it only works well on domains from the training dataset.
+### 9.2 核心结构
 
-**Sanity checks**:
-- replay the actions from a demonstration from your fine-tuning dataset and make sure that the robot can execute the task successfully (this ensures that your data collection pipeline is correct)
-- once you fine-tuned a model, load the model in your inference pipeline (as if you would run it to control the robot), but feed images from the fine-tuning dataset into the model (pretending they come from the robot) and verify that you can reproduce the token accuracies / L1 errors from training (this ensures that your inference pipeline is correct)
+1. 视觉编码器（Vision Backbone）  
+   OpenVLA-7B 使用 Prismatic 的 `prism-dinosiglip-224px` 路线，融合 DINOv2 + SigLIP 视觉特征。
 
-**Best practices for fine-tuning data collection**:
-If your setup passed the above two sanity checks, the issue may not be in model training, but in the data you fine-tuned the model with. Some best practices for data collection:
-- *Collect at a control frequency around 5-10Hz.* OpenVLA is not trained with action chunking, empirically the model struggles with high-frequency data. If your robot setup uses a high-frequency controller (eg 50 Hz), consider downsampling your actions to 5Hz. Verify first that your robot can still solve the task when using 5Hz actions (ie repeat sanity check (1) above with 5Hz actions)
-- *Avoid pauses / small actions during data collection.* Because OpenVLA is trained without action chunking, the model can be sensitive to idle actions in the fine-tuning data. If your data contains steps in which the robot barely moves, the model may "get stuck" in these steps at inference time. Try to collect fine-tuning demonstrations with continuous, slow movement.
-- *Ensure sufficient data coverage.* If you plan to test the model with some variation, e.g. different initial positions of objects, make sure that your fine-tuning data contains sufficient diversity of such conditions as well, e.g. shows demonstrations with diverse initial conditions.
-- *Use consistent task strategies during data collection.* This is not a hard constraint, but may make your life easier. Try to demonstrate tasks in consistent ways, e.g. approach objects from the same side, perform sub-steps in the same order even if they could be performed in arbitrary sequences. Being consistent gives you a less multi-modal fine-tuning dataset, which makes the modeling problem easier.
+2. 语言模型骨干（LLM）  
+   基于 Llama-2 系列语言模型结构作为动作生成主干。
 
+3. 动作离散化（Action Tokenization）  
+   连续动作会离散到 `256` 个 bin（代码中 `n_action_bins=256`），并映射到词表尾部 token，模型以“生成 token”的方式输出动作。
+
+4. 动作反归一化（Unnormalization）  
+   生成的是标准化动作，推理时依赖 `norm_stats`（如 `q01/q99`）恢复到真实动作量纲。
+
+### 9.3 为什么这样设计
+
+1. 可复用大模型生态：把机器人控制转成“序列生成”问题，可直接利用 HF + LLM 训练推理工具链。
+2. 文本任务泛化更强：任务以自然语言描述，跨任务迁移更方便。
+3. 统一接口：相机图像 + 文本进，动作出，和真实机器人部署接口一致。
 
 ---
 
-#### Citation
+## 10. 推理与结果读取
 
-If you find our code or models useful in your work, please cite [our paper](https://arxiv.org/abs/2406.09246):
+### 10.1 日志与视频位置
 
-```bibtex
-@article{kim24openvla,
-    title={OpenVLA: An Open-Source Vision-Language-Action Model},
-    author={{Moo Jin} Kim and Karl Pertsch and Siddharth Karamcheti and Ted Xiao and Ashwin Balakrishna and Suraj Nair and Rafael Rafailov and Ethan Foster and Grace Lam and Pannag Sanketi and Quan Vuong and Thomas Kollar and Benjamin Burchfiel and Russ Tedrake and Dorsa Sadigh and Sergey Levine and Percy Liang and Chelsea Finn},
-    journal = {arXiv preprint arXiv:2406.09246},
-    year={2024}
-} 
+- 日志文件：`$OPENVLA_REPO/experiments/logs/*.txt`
+- 回放视频：`$OPENVLA_REPO/rollouts/<date>/*.mp4`
+
+### 10.2 查看实时进度
+
+```bash
+tail -f $OPENVLA_REPO/experiments/logs/EVAL-libero_spatial-openvla-*.txt
 ```
+
+### 10.3 本机当前已观测到的实际结果样例
+
+- `# episodes completed : 500`
+- `# successes: 411 (82.2%)`
+
+该值已接近官方报告量级（Spatial 官方均值约 `84.7% ± 0.9%`）。
+
+---
+
+## 11. 常见问题与补救（按实际高频问题整理）
+
+### 11.1 `ModuleNotFoundError: No module named 'torch'`
+
+原因：命令没走 `openvla` 环境的 Python。  
+修复：
+
+```bash
+which python
+/mnt/data/home/yqy/miniforge3/envs/openvla/bin/python -c "import torch; print(torch.__version__)"
+```
+
+统一用：
+
+```bash
+export OPENVLA_PY=/mnt/data/home/yqy/miniforge3/envs/openvla/bin/python
+```
+
+### 11.2 卡在 `[*] Loading in BF16 with Flash-Attention Enabled`
+
+常见原因：
+
+1. 正在首次下载大模型分片（不是死机）。
+2. 网络或代理不稳定导致下载无速度。
+
+排查：
+
+```bash
+watch -n 10 "date '+%F %T'; ls -lh $WORK_ROOT/models/openvla-7b-finetuned-libero-spatial/.cache/huggingface/download | tail -n 5"
+```
+
+### 11.3 `hf_transfer` 报错 / CAS 链路报错
+
+典型报错：`RuntimeError: An error occurred while downloading using hf_transfer`  
+修复：
+
+```bash
+export HF_HUB_ENABLE_HF_TRANSFER=0
+export HF_HUB_DISABLE_XET=1
+```
+
+然后重试下载命令，自动断点续传。
+
+### 11.4 SSL 报错 `UNEXPECTED_EOF_WHILE_READING`
+
+原因：代理链路不稳或 TLS 中断。  
+修复建议：
+
+1. 先确认代理端口可用（`127.0.0.1:7897`）。
+2. 切换更稳定网络后重试。
+3. 临时取消代理做对比测试。
+
+### 11.5 `Address already in use`
+
+原因：端口被占用。  
+修复：
+
+```bash
+lsof -i :8016
+kill -9 <PID>
+```
+
+或直接换端口。
+
+### 11.6 TensorFlow / Gym / robosuite Warning 
+
+以下通常不是致命错误：
+
+1. TensorFlow oneDNN/cuDNN 注册 warning
+2. Gym unmaintained 提示
+3. robosuite 宏文件 warning
+
+只要脚本继续推进 episode 并输出成功率，通常可忽略这些 warning。
+
+### 11.7 下载到 0% 很久不动
+
+先确认不是刚建立连接。若长时间 0B/s：
+
+1. 换代理节点
+2. 关闭 `HF_HUB_ENABLE_HF_TRANSFER`
+3. 保留 `HF_HOME` 固定缓存，重复执行同一下载命令进行续传
+
+---
+
+## 12. 官方数据集说明
+
+1. 跑官方 `run_libero_eval.py` 评测，核心依赖是 LIBERO 环境、任务定义和官方 checkpoint。
+2. OpenVLA README 中提到的 `modified_libero_rlds`（约 10GB）主要用于微调训练，不是评测必须。
+
+可选下载命令：
+
+```bash
+cd $WORK_ROOT
+git clone https://huggingface.co/datasets/openvla/modified_libero_rlds
+```
+
+> 作当后续要做“再训练/微调”时，这份 RLDS 数据是关键
+
+---
+
+## 13. 执行前后自检
+
+### 13.1 执行前
+
+1. `nvidia-smi` 正常
+2. `openvla` conda 环境可用
+3. `python -c "import torch; print(torch.cuda.is_available())"` 为 `True`
+4. LIBERO config 文件存在
+5. checkpoint 分片完整
+
+### 13.2 执行后
+
+1. 日志文件生成在 `experiments/logs/`
+2. `rollouts/` 下生成 mp4
+3. 日志中持续出现 `# successes: ...`
+4. 完整 500 rollout 结束后有稳定总成功率
+
+---
+
+## 14. 推荐复现实验顺序（节省时间）
+
+1. 先下载 `libero_spatial` checkpoint，跑 smoke test（1 trial/task）。
+2. 再跑 `libero_spatial` 全量 500 rollout，确认链路稳定。
+3. 按同样流程跑 `object -> goal -> libero_10`。
+4. 最后统一汇总四套结果。
+
+---
+
+## 15. 参考入口（仓库内）
+
+1. 官方 LIBERO 评测脚本：`experiments/robot/libero/run_libero_eval.py`
+2. OpenVLA 推理工具：`experiments/robot/openvla_utils.py`
+3. 机器人评测公共函数：`experiments/robot/robot_utils.py`
+4. 动作离散器（256 bins）：`prismatic/vla/action_tokenizer.py`
+
+---
+
+## 16. 总结
+在 `Ubuntu 20.04 + RTX A5000` 上，本流程已经可以打通：
+1. OpenVLA 本地加载与 GPU 推理
+2. LIBERO 官方四套任务的标准评测入口
+3. 日志与视频证据链输出
+4. 常见网络/依赖/端口错误的可执行补救方案

@@ -83,10 +83,17 @@ class OpenVLAServer:
             trust_remote_code=True,
         ).to(self.device)
 
-        # [Hacky] Load Dataset Statistics from Disk (if passing a path to a fine-tuned model)
+        # [Hacky] Load Dataset Statistics from Disk (if passing a path to a fine-tuned model).
+        # For base HF checkpoints mirrored to a local directory, this file may not exist.
         if os.path.isdir(self.openvla_path):
-            with open(Path(self.openvla_path) / "dataset_statistics.json", "r") as f:
-                self.vla.norm_stats = json.load(f)
+            stats_path = Path(self.openvla_path) / "dataset_statistics.json"
+            if stats_path.exists():
+                with open(stats_path, "r") as f:
+                    self.vla.norm_stats = json.load(f)
+            else:
+                logging.warning(
+                    "No dataset_statistics.json found at %s; use `unnorm_key` in requests when needed.", stats_path
+                )
 
     def predict_action(self, payload: Dict[str, Any]) -> str:
         try:
