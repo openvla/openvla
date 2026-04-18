@@ -3,3 +3,14 @@ tokenizers==0.19.1
 torch>=2.2.0
 torchvision>=0.16.0
 transformers==4.40.1
+
+# NOTE: The OpenVLA model also requires the `prismatic` package, which is part of this repository.
+# You have two options:
+#
+# Option 1 (Recommended): Clone this repo and install it locally
+#   git clone https://github.com/openvla/openvla.git && cd openvla && pip install -e .
+#
+# Option 2: Install prismatic directly from GitHub (minimal installation)
+#   pip install "openvla @ git+https://github.com/openvla/openvla.git"
+#
+# IMPORTANT: Do NOT run `pip install prismatic` - that installs a different unrelated package!

@@ -44,9 +44,20 @@ HuggingFace `transformers` AutoClasses, with minimal dependencies.
 For example, to load `openvla-7b` for zero-shot instruction following in the
 [BridgeData V2 environments](https://rail-berkeley.github.io/bridgedata/) with a WidowX robot:
 
+```bash
+# Option 1 (Recommended): Clone and install the openvla package
+git clone https://github.com/openvla/openvla.git
+cd openvla
+pip install -e .
+
+# Option 2: Install directly from GitHub (without cloning)
+pip install "openvla @ git+https://github.com/openvla/openvla.git"
+
+# NOTE: The model requires the `prismatic` package which is part of this repository.
+# Do NOT run `pip install prismatic` - that installs a different unrelated package!
+```
+
 ```python
-# Install minimal dependencies (`torch`, `transformers`, `timm`, `tokenizers`, ...)
-# > pip install -r https://raw.githubusercontent.com/openvla/openvla/main/requirements-min.txt
 from transformers import AutoModelForVision2Seq, AutoProcessor
 from PIL import Image
 
