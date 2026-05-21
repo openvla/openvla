@@ -82,6 +82,9 @@ For deployment, we provide a lightweight script for [serving OpenVLA models over
 providing an easy way to integrate OpenVLA models into existing robot control stacks, 
 removing any requirement for powerful on-device compute.
 
+For a runnable single-image CLI example with dry-run, local-cache, and quantized-loading options, see
+[`examples/offline_inference.py`](./examples/offline_inference.py).
+
 ## Pretrained VLAs
 
 We release two OpenVLA models trained as part of our work, with checkpoints, configs, and model cards available [on our
