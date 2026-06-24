@@ -20,6 +20,11 @@ class ActionTokenizer:
         NOTE =>> by default, assumes a BPE-style tokenizer akin to the LlamaTokenizer, where *the least used tokens*
                  appear at the end of the vocabulary!
 
+        NOTE =>> digitization returns indices from 1 to `self.n_bins`, so valid action token IDs run from
+                 `tokenizer.vocab_size - self.n_bins` through `tokenizer.vocab_size - 1`, inclusive.
+                 `action_token_begin_idx` is one less than the first valid action token ID so masks can use
+                 `token_id > action_token_begin_idx`.
+
         :param tokenizer: Base LLM/VLM tokenizer to extend.
         :param bins: Number of bins for each continuous value; we'll adopt a uniform binning strategy.
         :param min_action: Minimum action value (for clipping, setting lower bound on bin interval).
