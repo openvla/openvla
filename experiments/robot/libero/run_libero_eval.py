@@ -26,12 +26,12 @@ from typing import Optional, Union
 import draccus
 import numpy as np
 import tqdm
-from libero.libero import benchmark
-
 import wandb
+from libero.libero import benchmark
 
 # Append current directory so that interpreter can find experiments.robot
 sys.path.append("../..")
+from experiments.robot.libero.episode_utils import reset_libero_episode
 from experiments.robot.libero.libero_utils import (
     get_libero_dummy_action,
     get_libero_env,
@@ -161,8 +161,9 @@ def eval_libero(cfg: GenerateConfig) -> None:
             print(f"\nTask: {task_description}")
             log_file.write(f"\nTask: {task_description}\n")
 
-            # Reset environment
-            env.reset()
+            # Seed immediately before reset so randomized fixtures are
+            # reproducible and independent of earlier policy rollouts.
+            reset_libero_episode(env, cfg.seed)
 
             # Set initial states
             obs = env.set_init_state(initial_states[episode_idx])
