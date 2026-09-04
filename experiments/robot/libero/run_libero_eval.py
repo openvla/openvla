@@ -32,6 +32,7 @@ import wandb
 
 # Append current directory so that interpreter can find experiments.robot
 sys.path.append("../..")
+from experiments.robot.libero.eval_utils import reset_libero_episode
 from experiments.robot.libero.libero_utils import (
     get_libero_dummy_action,
     get_libero_env,
@@ -161,11 +162,10 @@ def eval_libero(cfg: GenerateConfig) -> None:
             print(f"\nTask: {task_description}")
             log_file.write(f"\nTask: {task_description}\n")
 
-            # Reset environment
-            env.reset()
-
-            # Set initial states
-            obs = env.set_init_state(initial_states[episode_idx])
+            # Reset the fixture layout and restore the episode's initial state.
+            # Seeding here is important: LIBERO samples fixed-object placements
+            # during reset, while set_init_state only restores simulator state.
+            obs = reset_libero_episode(env, initial_states[episode_idx], cfg.seed)
 
             # Setup
             t = 0
