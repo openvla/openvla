@@ -89,6 +89,7 @@ class FinetuneConfig:
     save_steps: int = 5000                                          # Interval for checkpoint saving
     learning_rate: float = 5e-4                                     # Fine-tuning learning rate
     grad_accumulation_steps: int = 1                                # Gradient accumulation steps
+    max_grad_norm: float = 1.0                                      # Maximum gradient norm (0 disables clipping)
     image_aug: bool = True                                          # Whether to train with image augmentations
     shuffle_buffer_size: int = 100_000                              # Dataloader shuffle buffer size (can reduce if OOM)
     save_latest_checkpoint_only: bool = True                        # Whether to save only one checkpoint per run and
@@ -113,6 +114,8 @@ class FinetuneConfig:
 @draccus.wrap()
 def finetune(cfg: FinetuneConfig) -> None:
     print(f"Fine-tuning OpenVLA Model `{cfg.vla_path}` on `{cfg.dataset_name}`")
+    if cfg.max_grad_norm < 0:
+        raise ValueError("max_grad_norm must be non-negative")
 
     # [Validate] Ensure GPU Available & Set Device / Distributed Context
     assert torch.cuda.is_available(), "Fine-tuning assumes at least one GPU is available!"
@@ -124,7 +127,7 @@ def finetune(cfg: FinetuneConfig) -> None:
     exp_id = (
         f"{cfg.vla_path.split('/')[-1]}+{cfg.dataset_name}"
         f"+b{cfg.batch_size * cfg.grad_accumulation_steps}"
-        f"+lr-{cfg.learning_rate}"
+        f"+lr-{cfg.learning_rate}+clip-{cfg.max_grad_norm}"
     )
     if cfg.use_lora:
         exp_id += f"+lora-r{cfg.lora_rank}+dropout-{cfg.lora_dropout}"
@@ -313,6 +316,8 @@ def finetune(cfg: FinetuneConfig) -> None:
 
             # Optimizer Step
             if (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
+                if cfg.max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=cfg.max_grad_norm)
                 optimizer.step()
                 optimizer.zero_grad()
                 progress.update()
