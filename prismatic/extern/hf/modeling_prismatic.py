@@ -24,7 +24,7 @@ import torch
 import torch.nn as nn
 import transformers
 from timm.models.vision_transformer import LayerScale
-from transformers import AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
+from transformers import AutoModelForCausalLM, GenerationMixin, PretrainedConfig, PreTrainedModel
 from transformers.modeling_outputs import ModelOutput
 
 from .configuration_prismatic import OpenVLAConfig, PrismaticConfig
@@ -35,6 +35,19 @@ logger = logging.getLogger(__name__)
 
 # === PyTorch/HuggingFace Default IGNORE_INDEX (for CrossEntropyLoss labels)
 IGNORE_INDEX = -100
+
+
+def _cache_length(past_key_values: Any) -> int:
+    """Return sequence length stored in a KV cache (DynamicCache or legacy tuple), else 0."""
+    if past_key_values is None:
+        return 0
+    if hasattr(past_key_values, "get_seq_length"):
+        return past_key_values.get_seq_length() or 0
+    try:
+        # Legacy tuple cache: ((k, v), ...) with k shape [batch, heads, seq, dim]
+        return past_key_values[0][0].shape[2]
+    except Exception:
+        return 0
 
 
 # === Utility Functions for Monkey-Patching ===
@@ -181,6 +194,9 @@ class PrismaticPreTrainedModel(PreTrainedModel):
     _no_split_modules: ClassVar[List[str]] = ["PrismaticProjector"]
     _skip_keys_device_placement: str = "past_key_values"
     _supports_flash_attn_2: bool = True
+    # Plain class attr: transformers resolves attention impl during PreTrainedModel.__init__
+    # before language_model submodule exists (property would AttributeError).
+    _supports_sdpa: bool = True
 
     def _init_weights(self, module: nn.Module) -> None:
         # Important :: this HF ported version is *not* meant for training from scratch; only inference and fine-tuning!
@@ -204,13 +220,8 @@ class PrismaticPreTrainedModel(PreTrainedModel):
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
 
-    @property
-    def _supports_sdpa(self) -> bool:
-        """Check LLM supports SDPA Attention"""
-        return self.language_model._supports_sdpa
 
-
-class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
+class PrismaticForConditionalGeneration(PrismaticPreTrainedModel, GenerationMixin):
     def __init__(self, config: PrismaticConfig) -> None:
         super().__init__(config)
 
@@ -456,28 +467,33 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         **kwargs: str,
     ) -> Dict[str, torch.Tensor]:
-        """Borrowed from `LlamaForCausalLM` and simplified for batch size = 1; mirrors original PrismaticVLM logic."""
+        """Borrowed from `LlamaForCausalLM` and simplified for batch size = 1; mirrors original PrismaticVLM logic.
+
+        Under transformers >=4.50, the first generate() step may pass an empty DynamicCache
+        (truthy) instead of None. Only slice input_ids when the cache actually has length, and
+        normalize an empty cache to None so the multimodal forward path can run vision.
+        """
         if ((input_ids is not None) and (input_ids.shape[0] > 1)) or (
             (inputs_embeds is not None) and (inputs_embeds.shape[0] > 1)
         ):
             raise ValueError("Generation with batch size > 1 is not currently supported!")
 
-        # Handle `past_key_values` (cache) =>> assume `input_ids` just has unprocessed tokens
-        if past_key_values is not None:
-            input_ids = input_ids[:, -1:]
-
-        # If `input_embeds` are passed, we only want to use them in the 1st generation step
-        if inputs_embeds is not None and past_key_values is None:
-            model_inputs = {"input_embeds": inputs_embeds}
+        cache_len = _cache_length(past_key_values)
+        if cache_len > 0:
+            # Subsequent decode steps: only the last token + retained cache
+            model_inputs = {"input_ids": input_ids[:, -1:], "past_key_values": past_key_values}
+        elif inputs_embeds is not None:
+            # First step with embeds; empty cache must be None for multimodal assert
+            model_inputs = {"input_embeds": inputs_embeds, "past_key_values": None}
         else:
-            model_inputs = {"input_ids": input_ids}
+            # First step with full prompt; empty cache must be None for multimodal assert
+            model_inputs = {"input_ids": input_ids, "past_key_values": None}
 
         # Make sure `pixel_values` are preserved in `model_inputs`
         model_inputs.update(
             {
                 "attention_mask": attention_mask,
                 "pixel_values": pixel_values,
-                "past_key_values": past_key_values,
                 "use_cache": kwargs.get("use_cache"),
             }
         )
