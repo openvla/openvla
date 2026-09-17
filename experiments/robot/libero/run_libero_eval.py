@@ -161,6 +161,12 @@ def eval_libero(cfg: GenerateConfig) -> None:
             print(f"\nTask: {task_description}")
             log_file.write(f"\nTask: {task_description}\n")
 
+            # Re-seed before reset so fixture placement (model.body_pos) is sampled
+            # from the same RNG start every episode. set_init_state restores qpos/qvel
+            # only; fixtures without free joints otherwise drift when one env is reused
+            # across episodes (issue #342). Seed 0 matches get_libero_env().
+            env.seed(0)
+
             # Reset environment
             env.reset()
 
