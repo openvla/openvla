@@ -1,7 +1,9 @@
 """Utils for evaluating the OpenVLA policy."""
 
+import importlib.metadata
 import json
 import os
+import re
 import time
 
 import numpy as np
@@ -27,6 +29,45 @@ OPENVLA_V01_SYSTEM_PROMPT = (
     "The assistant gives helpful, detailed, and polite answers to the user's questions."
 )
 
+# transformers 4.40.1 dispatches bitsandbytes-quantized loads through accelerate's
+# `dispatch_model()` with a synthesized single-device `device_map`, and only sets
+# `model.is_loaded_in_4bit` / `model.is_loaded_in_8bit` *after* dispatch. accelerate >= 1.2.0
+# keys the dispatch decision on those (still unset) flags and falls through to `model.to()`,
+# which transformers rejects for bnb models with:
+#   ValueError: `.to` is not supported for `4-bit` or `8-bit` bitsandbytes models.
+# (accelerate < 1.2.0 forced the hooks path for bnb models, so it loads fine.)
+# See GH issues #286 / #287.
+MIN_BREAKING_ACCELERATE_VERSION = (1, 2, 0)
+
+
+def _parse_version(version_string):
+    """Parses a version string like "1.2.0rc1" into a comparable tuple of its leading numbers."""
+    numbers = re.findall(r"\d+", version_string)
+    if not numbers:
+        raise ValueError(f"Cannot parse version string: {version_string!r}")
+    version_tuple = tuple(int(number) for number in numbers[:3])
+    return version_tuple + (0,) * (3 - len(version_tuple))
+
+
+def _accelerate_distribution_version():
+    """Returns the version string of the installed `accelerate` distribution."""
+    return importlib.metadata.version("accelerate")
+
+
+def _raise_if_accelerate_breaks_bnb_dispatch():
+    """Fails fast when the installed `accelerate` cannot load bnb-quantized models (GH #286/#287)."""
+    try:
+        installed_version = _accelerate_distribution_version()
+    except importlib.metadata.PackageNotFoundError as exc:
+        raise ImportError("accelerate is required to load bitsandbytes-quantized models.") from exc
+    if _parse_version(installed_version) >= MIN_BREAKING_ACCELERATE_VERSION:
+        raise EnvironmentError(
+            f"bitsandbytes-quantized loading requires accelerate < "
+            f"{'.'.join(str(number) for number in MIN_BREAKING_ACCELERATE_VERSION)}, but accelerate "
+            f"{installed_version} is installed; see https://github.com/openvla/openvla/issues/287. "
+            "Fix: `pip install 'accelerate<1.2.0'`"
+        )
+
 
 def get_vla(cfg):
     """Loads and returns a VLA model from checkpoint."""
@@ -39,6 +80,12 @@ def get_vla(cfg):
     AutoImageProcessor.register(OpenVLAConfig, PrismaticImageProcessor)
     AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
     AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
+
+    # Fail fast (before downloading/loading checkpoint shards) when the installed accelerate would
+    # crash the quantized load with "`.to` is not supported for `4-bit` or `8-bit` bitsandbytes
+    # models" (GH issues #286/#287).
+    if cfg.load_in_8bit or cfg.load_in_4bit:
+        _raise_if_accelerate_breaks_bnb_dispatch()
 
     vla = AutoModelForVision2Seq.from_pretrained(
         cfg.pretrained_checkpoint,
