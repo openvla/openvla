@@ -30,6 +30,20 @@ OPENVLA_V01_SYSTEM_PROMPT = (
 
 def get_vla(cfg):
     """Loads and returns a VLA model from checkpoint."""
+    if getattr(cfg, "quic_adapter_path", None):
+        if cfg.load_in_8bit or cfg.load_in_4bit:
+            raise ValueError("QuIC requires an unquantized dense host")
+        from quic_petf import load_policy
+        host = {"checkpoint": str(cfg.pretrained_checkpoint), "revision": cfg.quic_base_revision,
+                "adaptation_state": cfg.quic_adaptation_state, "unnorm_key": cfg.unnorm_key,
+                "device": str(DEVICE), "dtype": "bfloat16", "center_crop": cfg.center_crop,
+                "attention": cfg.quic_attention}
+        if cfg.quic_norm_stats_path:
+            host["norm_stats_path"] = cfg.quic_norm_stats_path
+        policy = load_policy(host, cfg.quic_adapter_path)
+        cfg._quic_processor = policy.processor
+        policy.model._quic_policy = policy
+        return policy.model
     # Load VLA checkpoint.
     print("[*] Instantiating Pretrained VLA model")
     print("[*] Loading in BF16 with Flash-Attention Enabled")
@@ -74,6 +88,8 @@ def get_vla(cfg):
 
 def get_processor(cfg):
     """Get VLA model's Hugging Face processor."""
+    if getattr(cfg, "quic_adapter_path", None):
+        return cfg._quic_processor
     processor = AutoProcessor.from_pretrained(cfg.pretrained_checkpoint, trust_remote_code=True)
     return processor
 
@@ -126,6 +142,8 @@ def crop_and_resize(image, crop_scale, batch_size):
 
 def get_vla_action(vla, processor, base_vla_name, obs, task_label, unnorm_key, center_crop=False):
     """Generates an action with the VLA policy."""
+    if hasattr(vla, "_quic_policy"):
+        return vla._quic_policy.predict(obs["full_image"], task_label)
     image = Image.fromarray(obs["full_image"])
     image = image.convert("RGB")
 

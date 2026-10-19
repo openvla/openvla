@@ -1,0 +1,8 @@
+include README.md README.upstream.md LICENSE requirements-min.txt
+include .dockerignore
+recursive-include requirements *.txt
+recursive-include experiments *.json *.md *.py *.txt
+recursive-include scripts *.py
+recursive-include vla-scripts *.py
+recursive-include deploy Dockerfile *.yaml *.md
+recursive-include tests/quic *.py

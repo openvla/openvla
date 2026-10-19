@@ -1,0 +1,5 @@
+-r rlds.txt
+peft==0.11.1
+wandb
+matplotlib
+jsonlines

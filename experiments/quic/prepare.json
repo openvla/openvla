@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "data": {
+    "tfds_directory": "/datasets/source/1.0.0",
+    "dataset_name": "REPLACE_WITH_OXE_DATASET_NAME",
+    "source_split": "train",
+    "seed": 7,
+    "validation_fraction": 0.2,
+    "frame_stride": 1,
+    "max_episodes_per_group": 10,
+    "max_frames_per_episode": 32,
+    "image_size": 224
+  }
+}

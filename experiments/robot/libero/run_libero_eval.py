@@ -63,6 +63,12 @@ class GenerateConfig:
     load_in_8bit: bool = False                       # (For OpenVLA only) Load with 8-bit quantization
     load_in_4bit: bool = False                       # (For OpenVLA only) Load with 4-bit quantization
 
+    quic_adapter_path: Optional[str] = None          # Adapter-only artifact; dense checkpoint stays separate
+    quic_base_revision: str = ""                     # Immutable source revision of the dense checkpoint
+    quic_adaptation_state: str = "none"              # none or merged
+    quic_attention: str = "sdpa"                     # flash_attention_2 requires optional FlashAttention
+    quic_norm_stats_path: Optional[str] = None       # Explicit external frozen host statistics, if needed
+
     center_crop: bool = True                         # Center crop? (if trained w/ random crop image aug)
 
     #################################################################################################################

@@ -492,6 +492,45 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
 class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
     config_class: PretrainedConfig = OpenVLAConfig
 
+    def _check_quic_host(self):
+        config = getattr(self, "config", None)
+        if getattr(self, "is_quantized", False) or getattr(config, "quantization_config", None):
+            raise ValueError("QuIC requires a dense, unquantized OpenVLA host")
+        if getattr(getattr(config, "text_config", None), "pretraining_tp", 1) != 1:
+            raise ValueError("QuIC requires pretraining_tp=1; sliced F.linear calls bypass adapter modules")
+
+    def enable_quic(self, targets):
+        """Freeze the dense host and inject explicit ``name: AdapterConfig`` targets.
+
+        Experiment presets and target-selection policies belong to callers.
+        QuIC participates in the normal forward/generation path of this model.
+        """
+        from quic_petf_vla import inject
+        self._check_quic_host()
+        return inject(self, targets)
+
+    def quic_parameters(self):
+        """Return only trainable QuIC parameters for an optimizer."""
+        from quic_petf_vla import adapter_parameters
+        return adapter_parameters(self)
+
+    def save_quic_adapter(self, directory, host_identity, metadata=None):
+        """Export adapter-only tensors bound to an immutable dense-host identity."""
+        from quic_petf_vla import save_adapter
+        return save_adapter(self, directory, host_identity, metadata=metadata)
+
+    def load_quic_adapter(self, directory, host_identity):
+        """Verify and attach an adapter before ordinary ``predict_action`` calls."""
+        from quic_petf_vla import load_adapter
+        self._check_quic_host()
+        return load_adapter(self, directory, host_identity)
+
+    def save_pretrained(self, *args, **kwargs):
+        from quic_petf_vla import QuICLinear
+        if any(isinstance(module, QuICLinear) for module in self.modules()):
+            raise ValueError("Active QuIC adapters require save_quic_adapter(); a dense HF checkpoint is a separate export")
+        return super().save_pretrained(*args, **kwargs)
+
     def __init__(self, config: OpenVLAConfig) -> None:
         super().__init__(config)
         self.norm_stats = config.norm_stats

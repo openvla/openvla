@@ -12,7 +12,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Union
 
 import draccus
 
@@ -36,6 +36,11 @@ from experiments.robot.robot_utils import (
 
 @dataclass
 class GenerateConfig:
+    quic_adapter_path: Optional[str] = None
+    quic_base_revision: str = ""
+    quic_adaptation_state: str = "none"
+    quic_attention: str = "sdpa"
+    quic_norm_stats_path: Optional[str] = None
     # fmt: off
 
     #################################################################################################################

@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "host": {
+    "checkpoint": "/models/openvla-7b",
+    "revision": "REPLACE_WITH_IMMUTABLE_40_CHARACTER_REVISION",
+    "adaptation_state": "none",
+    "device": "cuda:0",
+    "dtype": "bfloat16",
+    "attention": "sdpa",
+    "unnorm_key": "my_robot",
+    "prompt_style": "modern",
+    "center_crop": false
+  },
+  "targets": {
+    "projector.fc2": {
+      "orders": [1, 2],
+      "block_count": 8,
+      "base_size": 31,
+      "share_across_blocks": false,
+      "orthogonal": true,
+      "construction_dtype": "float32"
+    }
+  },
+  "data": {
+    "manifest": "/datasets/prepared/manifest.json"
+  },
+  "training": {
+    "seed": 7,
+    "max_steps": 3,
+    "batch_size": 1,
+    "gradient_accumulation_steps": 1,
+    "validation_batches": 4,
+    "learning_rate": 0.0001,
+    "gradient_checkpointing": true,
+    "max_trainable_parameters": 1000000
+  }
+}

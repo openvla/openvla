@@ -1,0 +1,8 @@
+-r core.txt
+tensorflow==2.15.0
+tensorflow-datasets==4.9.3
+tensorflow-graphics==2021.12.3
+tensorflow-metadata==1.17.2
+protobuf==4.21.12
+pyopenssl==26.3.0
+dlimp @ git+https://github.com/moojink/dlimp_openvla.git@040105d256bd28866cc6620621a3d5f7b6b91b46
