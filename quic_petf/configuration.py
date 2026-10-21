@@ -30,15 +30,19 @@ def explicit_targets(specification, inventory):
     """Resolve only exact model-module names and plain AdapterConfig values."""
     from quic_petf_vla import AdapterConfig
     if not isinstance(specification, dict) or not specification:
-        raise ValueError("targets must map exact linear-module names to AdapterConfig objects")
+        raise ValueError("targets must map exact Linear/Conv2d module names to AdapterConfig objects")
     lookup = {row["name"]: row for row in inventory}
     selected = {}
     for name, values in specification.items():
         if name not in lookup or not lookup[name].get("used_in_policy", True):
             raise ValueError(f"Target is absent or does not contribute to policy outputs: {name}")
+        if not lookup[name].get("supported", True):
+            raise ValueError(f"Unsupported QuIC target type {lookup[name]['type']}: {name}")
         if not isinstance(values, dict):
             raise ValueError(f"Target {name} requires an explicit AdapterConfig object")
         config = AdapterConfig(**values)
+        if lookup[name].get("module_type") == "Conv2d" and config.block_count % lookup[name]["groups"]:
+            raise ValueError(f"Conv2d block_count must be divisible by groups: {name}")
         config.resolve(lookup[name]["out_features"])
         selected[name] = config
     return selected

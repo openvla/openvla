@@ -52,15 +52,19 @@ class Processor:
         (Path(path) / 'processor.json').write_text('{}')
 
 
-def tiny_host():
+def tiny_host(convolution=False):
     model = OpenVLAForActionPrediction.__new__(OpenVLAForActionPrediction)
     nn.Module.__init__(model)
-    model.vision_backbone = nn.Identity()
+    model.vision_backbone = nn.Module() if convolution else nn.Identity()
+    if convolution:
+        model.vision_backbone.proj = nn.Conv2d(3, 8, 1)
     model.projector = nn.Module()
-    model.projector.fc2 = nn.Linear(3, 512)
+    model.projector.fc2 = nn.Linear(8 if convolution else 3, 512)
     model.norm_stats = {'robot': {'action': {'q01': [-1.] * 7, 'q99': [1.] * 7, 'mask': [True] * 6 + [False]}}}
 
     def forward(self, input_ids, pixel_values, labels, **kwargs):
+        if convolution:
+            pixel_values = self.vision_backbone.proj(pixel_values[:, :, None, None]).flatten(1)
         logits = self.projector.fc2(pixel_values)[:, None].expand(-1, input_ids.shape[1], -1)
         loss = F.cross_entropy(logits[:, :-1].reshape(-1, 512), labels[:, 1:].reshape(-1), ignore_index=-100)
         return SimpleNamespace(logits=logits, loss=loss)
@@ -159,6 +163,40 @@ class StandaloneTests(unittest.TestCase):
                 self.assertTrue((root / 'run/adapter/adapter.safetensors').is_file())
                 self.assertNotIn('tensorflow', set(sys.modules) - already_imported)
                 self.assertNotIn('ovlab_core', set(sys.modules) - already_imported)
+
+    def test_mixed_conv_linear_training_and_reload_with_frozen_host(self):
+        from quic_petf.host import module_inventory
+        from quic_petf.tuning import train
+        torch.manual_seed(77)
+        pristine = tiny_host(convolution=True)
+        inventory = module_inventory(pristine)
+        def load(host, training=False):
+            return copy.deepcopy(pristine), Processor(), {'device': 'cpu'}
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            config = {'host': {'device': 'cpu', 'unnorm_key': 'robot'},
+                      'data': {'manifest': str(self.create_data(root))},
+                      'targets': {key: {'orders': [1], 'block_count': 1, 'base_size': 4}
+                                  for key in ('vision_backbone.proj', 'projector.fc2')},
+                      'training': {'max_steps': 2, 'learning_rate': .01, 'validation_batches': 1,
+                                   'gradient_checkpointing': False}}
+            with patch('quic_petf.host.load_host', side_effect=load), \
+                 patch('quic_petf.host.checkpoint_identity', return_value={'checkpoint_sha256': 'a' * 64}), \
+                 patch('quic_petf.host.layer_inventory', return_value=(inventory, 0)):
+                result = train(config, root / 'run')
+            self.assertEqual(result['trainable_parameters'], 12)
+            self.assertEqual(result['identity_logit_max_absolute_error'], 0)
+            self.assertEqual(result['reload_logit_max_absolute_error'], 0)
+            saved = json.loads((root / 'run/adapter/adapter.json').read_text())
+            self.assertEqual(saved['format_version'], 2)
+            self.assertEqual(saved['manifest'][0]['module_type'], 'Conv2d')
+
+        # Conv-only adapters must also block accidental dense HF serialization.
+        from quic_petf_vla import AdapterConfig
+        model = tiny_host(convolution=True)
+        model.enable_quic({'vision_backbone.proj': AdapterConfig(orders=[1], block_count=1, base_size=4)})
+        with self.assertRaisesRegex(ValueError, 'save_quic_adapter'):
+            model.save_pretrained('/unused-conv-dense-checkpoint')
 
     @unittest.skipUnless(importlib.util.find_spec('fastapi'), 'install the serve extra')
     def test_http_action_contract_uses_uint8_and_does_not_load_a_second_model(self):

@@ -526,8 +526,8 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         return load_adapter(self, directory, host_identity)
 
     def save_pretrained(self, *args, **kwargs):
-        from quic_petf_vla import QuICLinear
-        if any(isinstance(module, QuICLinear) for module in self.modules()):
+        from quic_petf_vla import QuICLinear, QuICConv2d
+        if any(isinstance(module, (QuICLinear, QuICConv2d)) for module in self.modules()):
             raise ValueError("Active QuIC adapters require save_quic_adapter(); a dense HF checkpoint is a separate export")
         return super().save_pretrained(*args, **kwargs)
 

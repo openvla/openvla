@@ -66,11 +66,12 @@ def main(argv=None):
             from .host import layer_inventory
             inventory, count = layer_inventory(host)
             if args.json:
-                print(json.dumps({"language_layers": count, "linear_modules": inventory}))
+                print(json.dumps({"language_layers": count, "modules": inventory,
+                                  "linear_modules": [item for item in inventory if item["type"] == "Linear"]}))
             else:
                 for item in inventory:
-                    if item["used_in_policy"]:
-                        print(f"{item['name']}  {item['in_features']} -> {item['out_features']}")
+                    if item["used_in_policy"] and item.get("supported", True):
+                        print(f"{item['name']}  {item['type']} {item['in_features']} -> {item['out_features']}")
             return 0
         if args.command == "prepare":
             from .prepare import prepare

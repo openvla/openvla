@@ -86,10 +86,10 @@ def train(config, output, *, fit_action_normalization=False):
     import numpy as np
     import torch
     from tqdm.auto import tqdm
-    from quic_petf_vla import QuICLinear, disabled_adapters
+    from quic_petf_vla import QuICLinear, QuICConv2d, disabled_adapters
     from .configuration import explicit_targets
     from .data import EpisodeDataset, fit_statistics, read_manifest
-    from .host import checkpoint_identity, layer_inventory, load_host
+    from .host import checkpoint_identity, layer_inventory, load_host, enable_gradient_checkpointing
     if int(os.environ.get("WORLD_SIZE", "1")) != 1:
         raise ValueError("The standalone adapter trainer currently supports a single process/device")
     config = copy.deepcopy(config)
@@ -150,7 +150,7 @@ def train(config, output, *, fit_action_normalization=False):
     if {id(p) for p in model.parameters() if p.requires_grad} != {id(p) for p in parameters}:
         raise ValueError("Optimizer would include parameters outside QuIC adapters")
     if settings["gradient_checkpointing"]:
-        model.language_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        write_json(output / "gradient-checkpointing.json", enable_gradient_checkpointing(model))
     with disabled_adapters(model):
         baseline = validate(model, val_loader, device=device, max_batches=settings["validation_batches"], description="Host validation")
     optimizer = torch.optim.AdamW(parameters, lr=settings["learning_rate"], weight_decay=0.0)
@@ -195,7 +195,7 @@ def train(config, output, *, fit_action_normalization=False):
     processor.save_pretrained(output / "processor")
     del optimizer, parameters
     for name, module in list(model.named_modules()):
-        if isinstance(module, QuICLinear):
+        if isinstance(module, (QuICLinear, QuICConv2d)):
             parent, _, child = name.rpartition(".")
             setattr(model.get_submodule(parent) if parent else model, child, module.base_layer)
     model.load_quic_adapter(output / "adapter", identity)

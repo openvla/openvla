@@ -3,6 +3,7 @@ import hashlib
 import json
 import re
 import time
+from types import MethodType
 from pathlib import Path
 
 import torch
@@ -152,6 +153,77 @@ def load_processor(host):
     return PrismaticProcessor(image_processor=image_processor, tokenizer=tokenizer)
 
 
+def module_inventory(model):
+    """Inventory weighted targets, retaining unsupported types for explicit errors.
+
+    Output dimensions consistently name the dimension transformed by QuIC.
+    Conv2d rotates output channels, independently at every spatial position.
+    """
+    entries = []
+    for name, module in model.named_modules():
+        if "weight" not in module._parameters or module._parameters["weight"] is None:
+            continue
+        entry = {"name": name, "type": type(module).__name__,
+                 "supported": type(module) in (torch.nn.Linear, torch.nn.Conv2d),
+                 "weight_shape": list(module.weight.shape), "used_in_policy": True}
+        if type(module) is torch.nn.Linear:
+            entry.update(in_features=module.in_features, out_features=module.out_features,
+                         bias=module.bias is not None)
+        elif type(module) is torch.nn.Conv2d:
+            entry.update(in_features=module.in_channels, out_features=module.out_channels,
+                         bias=module.bias is not None, module_type="Conv2d",
+                         in_channels=module.in_channels, out_channels=module.out_channels,
+                         kernel_size=list(module.kernel_size), stride=list(module.stride),
+                         padding=module.padding if isinstance(module.padding, str) else list(module.padding),
+                         dilation=list(module.dilation), groups=module.groups,
+                         padding_mode=module.padding_mode)
+        match = re.match(r"vision_backbone\.(featurizer|fused_featurizer)\.blocks\.(\d+)\.", name)
+        if match:
+            encoder = getattr(model.vision_backbone, match[1])
+            if int(match[2]) > len(encoder.blocks) - 2:
+                entry["used_in_policy"] = False
+                entry["inactive_reason"] = "OpenVLA returns second-to-last vision block features"
+        # get_intermediate_layers(norm=False) also bypasses forward_head and
+        # its SigLIP attention pool, plus the encoder's final normalization.
+        if re.match(r"vision_backbone\.(?:featurizer|fused_featurizer)\.(?:attn_pool|fc_norm|head|norm)(?:\.|$)", name):
+            entry["used_in_policy"] = False
+            entry["inactive_reason"] = "OpenVLA intermediate vision features bypass final normalization, pooling and classifier"
+        entries.append(entry)
+    return entries
+
+
+def _checkpointed_vision_block(module, *args, **kwargs):
+    from torch.utils.checkpoint import checkpoint
+    original = module._quic_original_forward
+    # Vision intentionally stays in eval mode during adapter training, so the
+    # autograd context, rather than module.training, decides whether to checkpoint.
+    if torch.is_grad_enabled():
+        return checkpoint(original, *args, use_reentrant=False, **kwargs)
+    return original(*args, **kwargs)
+
+
+def enable_gradient_checkpointing(model):
+    """Checkpoint Llama and the timm blocks used by intermediate vision features.
+
+    timm's set_grad_checkpointing only affects forward_features, while OpenVLA
+    calls get_intermediate_layers. Preserve module names and artifact targets
+    by checkpointing each original block forward without adding wrapper modules.
+    """
+    model.language_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    count = 0
+    for name in ("featurizer", "fused_featurizer"):
+        encoder = getattr(model.vision_backbone, name, None)
+        if encoder is None:
+            continue
+        for block in encoder.blocks:
+            if not hasattr(block, "_quic_original_forward"):
+                block._quic_original_forward = block.forward
+                block.forward = MethodType(_checkpointed_vision_block, block)
+            count += 1
+    return {"schema_version": "openvla.gradient-checkpointing/v1", "language": True,
+            "vision_blocks": count, "use_reentrant": False}
+
+
 def layer_inventory(host):
     """Instantiate architecture on meta device; no 7B weights are allocated."""
     _verify_model_source()
@@ -164,18 +236,7 @@ def layer_inventory(host):
         raise ValueError("pretraining_tp must equal 1: TP sliced F.linear branches bypass adapter wrappers")
     with init_empty_weights():
         model = OpenVLAForActionPrediction(config)
-    entries = [{"name": name, "in_features": m.in_features, "out_features": m.out_features,
-                "bias": m.bias is not None, "type": type(m).__name__}
-               for name, m in model.named_modules() if isinstance(m, torch.nn.Linear)]
-    for entry in entries:
-        entry["used_in_policy"] = True
-        match = re.match(r"vision_backbone\.(featurizer|fused_featurizer)\.blocks\.(\d+)\.", entry["name"])
-        if match:
-            encoder = getattr(model.vision_backbone, match[1])
-            if int(match[2]) > len(encoder.blocks) - 2:
-                entry["used_in_policy"] = False
-                entry["inactive_reason"] = "OpenVLA returns second-to-last vision block features"
-    return entries, config.text_config.num_hidden_layers
+    return module_inventory(model), config.text_config.num_hidden_layers
 
 
 def load_host(host, training=False):
