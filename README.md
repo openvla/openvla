@@ -61,6 +61,36 @@ parameters = model.quic_parameters()  # pass to your own optimizer
 # model.load_quic_adapter(directory, host_identity)
 ```
 
+### Optional continuous action chunks
+
+The token model remains the default. Before `enable_quic`, enable a continuous
+readout with:
+
+```python
+model.configure_action_head({"type": "mlp_chunk", "horizon": 8, "hidden_dim": 512})
+# Inject your explicit active backbone targets, excluding language_model.lm_head.
+model.enable_quic(targets)
+optimizer = torch.optim.AdamW(model.adaptation_parameters(), lr=1e-4)
+# forward(..., actions=[B,H,7], action_mask=[B,H]) -> masked L1 loss and .actions
+# predict_action(...) -> decoded [H,7], including H=1
+```
+
+The small head reads the last valid prompt state using the decoder directly,
+without vocabulary logits or autoregressive action generation. It is trained in
+full in FP32 alongside QuIC. `quic_parameters()` continues to select adapters
+only; `adaptation_parameters()` adds the head. The QuIC compound operators and
+portable adapter format are unchanged.
+
+For standalone commands put the same object in `host.action_head` of the JSON
+configuration. `prepare` retains complete action trajectories even when images
+are sampled with a frame stride. Training masks future steps beyond episode or
+instruction boundaries. Validation reports normalized L1. Use the model's
+`save_quic_adapter`/`load_quic_adapter` methods for the complete bundle: optional
+head weights are stored in `action_head.safetensors`, bound by configuration,
+host identity and SHA256 in the adapter manifest. `load_policy` reconstructs the
+variant from that manifest. `/act` returns a nested `action` array for chunks.
+Omit the option or set it to `null` to construct the original token model.
+
 For a complete local checkpoint + processor + artifact runtime:
 
 ```python

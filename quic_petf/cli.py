@@ -40,14 +40,18 @@ def summary(document):
             print(f"{key.replace('_', ' ')}: {document[key]}")
     for key in ("baseline_validation", "adapter_validation"):
         metrics = document.get(key)
-        if metrics:
+        if metrics and "normalized_l1" in metrics:
+            print(f"{key.replace('_', ' ')}: normalized L1={metrics['normalized_l1']:.4f}")
+        elif metrics:
             print(f"{key.replace('_', ' ')}: CE={metrics['action_token_cross_entropy']:.4f} "
                   f"accuracy={metrics['action_token_accuracy']:.2%}")
     if "action_token_cross_entropy" in document:
         print(f"Validation: CE={document['action_token_cross_entropy']:.4f} "
               f"accuracy={document['action_token_accuracy']:.2%}")
+    if "normalized_l1" in document:
+        print(f"Validation: normalized L1={document['normalized_l1']:.4f}")
     if "action" in document:
-        print("Action: " + " ".join(f"{value:.6g}" for value in document["action"]))
+        print("Action: " + json.dumps(document["action"]))
 
 
 def main(argv=None):

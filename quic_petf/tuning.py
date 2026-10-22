@@ -29,6 +29,9 @@ def make_loader(dataset, processor, batch_size, *, shuffle=False, seed=7):
         return {"input_ids": ids, "attention_mask": ids.ne(processor.tokenizer.pad_token_id),
                 "labels": pad_sequence([row["labels"] for row in rows], batch_first=True, padding_value=-100),
                 "pixel_values": torch.stack([row["pixel_values"] for row in rows])}
+    if getattr(dataset, "action_head", None) is not None:
+        from .action_heads import chunk_collator
+        collate = chunk_collator(processor)
     return DataLoader(dataset, batch_size=batch_size, num_workers=0, shuffle=shuffle,
                       collate_fn=collate, generator=torch.Generator().manual_seed(seed))
 
@@ -37,6 +40,9 @@ def validate(model, loader, *, device, max_batches=4, description="Validation"):
     import torch
     import torch.nn.functional as F
     from tqdm.auto import tqdm
+    if getattr(model, "action_head", None) is not None:
+        from .action_heads import validate_chunks
+        return validate_chunks(model, loader, device=device, max_batches=max_batches, description=description)
     model.eval()
     count = correct = batches = 0
     loss = 0.0
@@ -89,7 +95,7 @@ def train(config, output, *, fit_action_normalization=False):
     from quic_petf_vla import QuICLinear, QuICConv2d, disabled_adapters
     from .configuration import explicit_targets
     from .data import EpisodeDataset, fit_statistics, read_manifest
-    from .host import checkpoint_identity, layer_inventory, load_host, enable_gradient_checkpointing
+    from .host import checkpoint_identity, layer_inventory, load_host, enable_gradient_checkpointing, text_hidden_size
     if int(os.environ.get("WORLD_SIZE", "1")) != 1:
         raise ValueError("The standalone adapter trainer currently supports a single process/device")
     config = copy.deepcopy(config)
@@ -107,7 +113,12 @@ def train(config, output, *, fit_action_normalization=False):
                 (cfg.base_size * (cfg.base_size - 1) // 2 if cfg.orthogonal else cfg.base_size**2)
                 for name, target in targets.items() for cfg in [target.resolve(next(
                     row["out_features"] for row in inventory if row["name"] == name))])
-    if count > settings["max_trainable_parameters"]:
+    head_spec = host.get("action_head")
+    head_count = 0
+    if head_spec is not None:
+        hidden_size = text_hidden_size(inventory)
+        head_count = (hidden_size + 1) * head_spec["hidden_dim"] + (head_spec["hidden_dim"] + 1) * head_spec["horizon"] * 7
+    if count + head_count > settings["max_trainable_parameters"]:
         raise ValueError("Adapter parameter budget exceeded before loading model weights")
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -126,8 +137,8 @@ def train(config, output, *, fit_action_normalization=False):
     if normalization is None:
         normalization = {"unnorm_key": host["unnorm_key"], "action_statistics": stats, "mode": "host"}
         normalization["sha256"] = hashlib.sha256(json.dumps(normalization, sort_keys=True, allow_nan=False).encode()).hexdigest()
-    train_ds = EpisodeDataset(path, manifest, "train", processor, stats)
-    val_ds = EpisodeDataset(path, manifest, "validation", processor, stats)
+    train_ds = EpisodeDataset(path, manifest, "train", processor, stats, action_head=head_spec)
+    val_ds = EpisodeDataset(path, manifest, "validation", processor, stats, action_head=head_spec)
     loader = make_loader(train_ds, processor, settings["batch_size"], shuffle=True, seed=settings["seed"])
     val_loader = make_loader(val_ds, processor, settings["batch_size"])
     write_json(output / "config.json", config)
@@ -138,17 +149,20 @@ def train(config, output, *, fit_action_normalization=False):
     def reference():
         model.eval()
         with torch.inference_mode():
-            logits = model(**sample, use_cache=False).logits[:, -sample["labels"].shape[1]:-1]
+            output = model(**sample, use_cache=False)
+            if head_spec is not None:
+                return output.actions.float().cpu()
+            logits = output.logits[:, -sample["labels"].shape[1]:-1]
             return logits[sample["labels"][:, 1:] != -100].float().cpu()
     baseline_reference = reference()
     selection = model.enable_quic(targets)
     if not torch.equal(reference(), baseline_reference):
         raise ValueError("QuIC initialization changed host action-token logits")
     del baseline_reference
-    parameters = model.quic_parameters()
+    parameters = model.adaptation_parameters()
     initial = [parameter.detach().cpu().clone() for parameter in parameters]
     if {id(p) for p in model.parameters() if p.requires_grad} != {id(p) for p in parameters}:
-        raise ValueError("Optimizer would include parameters outside QuIC adapters")
+        raise ValueError("Optimizer selection differs from QuIC adapters plus optional action head")
     if settings["gradient_checkpointing"]:
         write_json(output / "gradient-checkpointing.json", enable_gradient_checkpointing(model))
     with disabled_adapters(model):
@@ -198,10 +212,15 @@ def train(config, output, *, fit_action_normalization=False):
         if isinstance(module, (QuICLinear, QuICConv2d)):
             parent, _, child = name.rpartition(".")
             setattr(model.get_submodule(parent) if parent else model, child, module.base_layer)
+    if model.action_head is not None:
+        with torch.no_grad():
+            for parameter in model.action_head.parameters():
+                parameter.zero_()
     model.load_quic_adapter(output / "adapter", identity)
     if not torch.equal(reference(), learned):
         raise ValueError("Serialized adapter reload changed action-token logits")
-    result = {"status": "completed", "optimizer_steps": settings["max_steps"], "trainable_parameters": count,
+    result = {"status": "completed", "optimizer_steps": settings["max_steps"], "trainable_parameters": count + head_count,
+              "action_head_parameters": head_count, "model_variant": {"action_head": head_spec},
               "baseline_validation": baseline, "adapter_validation": final, "host_identity": identity,
               "normalization_contract": normalization, "target_manifest": selection, "runtime": runtime,
               "identity_logit_max_absolute_error": 0.0, "reload_logit_max_absolute_error": 0.0,
@@ -216,7 +235,8 @@ def evaluate(config, adapter, output):
     policy = load_policy(config["host"], adapter)
     path, manifest = read_manifest(config["data"]["manifest"])
     stats = policy.model.norm_stats[policy.host["unnorm_key"]]["action"]
-    dataset = EpisodeDataset(path, manifest, "validation", policy.processor, stats)
+    dataset = EpisodeDataset(path, manifest, "validation", policy.processor, stats,
+                             action_head=policy.host.get("action_head"))
     settings = training_settings(config)
     loader = make_loader(dataset, policy.processor, settings["batch_size"])
     result = validate(policy.model, loader, device=policy.host.get("device", "cuda:0"), max_batches=settings["validation_batches"])

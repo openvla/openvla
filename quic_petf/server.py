@@ -26,7 +26,8 @@ def create_app(policy):
             raise HTTPException(status_code=422, detail="image must be an integer RGB array [H,W,3] in [0,255]")
         with lock:
             action = np.asarray(policy.predict(image.astype(np.uint8), instruction), dtype=np.float32)
-        if action.ndim != 1 or not np.isfinite(action).all():
+        if (action.ndim not in (1, 2) or action.shape[-1] != 7
+                or (action.ndim == 2 and action.shape[0] < 1) or not np.isfinite(action).all()):
             raise HTTPException(status_code=500, detail="model returned invalid action values")
         return {"action": action.tolist()}
     return app

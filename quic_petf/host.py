@@ -111,8 +111,11 @@ def checkpoint_identity(host):
                 "quic_method_sha256": sha256_file(method.__file__),
                 "integration_source_sha256": hashlib.sha256(json.dumps({
                     name: sha256_file(Path(__file__).parent / name)
-                    for name in ("host.py", "preprocessing.py", "runtime.py", "artifacts.py")
+                    for name in ("host.py", "preprocessing.py", "runtime.py", "artifacts.py", "action_heads.py")
                 }, sort_keys=True).encode()).hexdigest()}
+    if host.get("action_head") is not None:
+        from prismatic.extern.hf.action_chunks import validate_action_head
+        identity["action_head"] = validate_action_head(host["action_head"])
     if normalization_sha256:
         identity["normalization_stats_sha256"] = normalization_sha256
     if _inline_action_normalization(host) is not None:
@@ -163,6 +166,8 @@ def module_inventory(model):
     for name, module in model.named_modules():
         if "weight" not in module._parameters or module._parameters["weight"] is None:
             continue
+        if name.startswith("action_head."):
+            continue  # The optional readout is trained in full, outside QuIC targets.
         entry = {"name": name, "type": type(module).__name__,
                  "supported": type(module) in (torch.nn.Linear, torch.nn.Conv2d),
                  "weight_shape": list(module.weight.shape), "used_in_policy": True}
@@ -188,6 +193,9 @@ def module_inventory(model):
         if re.match(r"vision_backbone\.(?:featurizer|fused_featurizer)\.(?:attn_pool|fc_norm|head|norm)(?:\.|$)", name):
             entry["used_in_policy"] = False
             entry["inactive_reason"] = "OpenVLA intermediate vision features bypass final normalization, pooling and classifier"
+        if name == "language_model.lm_head" and getattr(model, "action_head", None) is not None:
+            entry["used_in_policy"] = False
+            entry["inactive_reason"] = "Continuous action chunks bypass the vocabulary head"
         entries.append(entry)
     return entries
 
@@ -224,6 +232,14 @@ def enable_gradient_checkpointing(model):
             "vision_blocks": count, "use_reentrant": False}
 
 
+def text_hidden_size(inventory):
+    """Get decoder width from the meta-model inventory, not sparse HF JSON defaults."""
+    for entry in inventory:
+        if entry["name"] == "language_model.model.layers.0.self_attn.q_proj":
+            return entry["in_features"]
+    raise ValueError("OpenVLA inventory is missing the first Llama q_proj dimensions")
+
+
 def layer_inventory(host):
     """Instantiate architecture on meta device; no 7B weights are allocated."""
     _verify_model_source()
@@ -232,6 +248,9 @@ def layer_inventory(host):
     from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
     path = checkpoint_path(host)
     config = OpenVLAConfig.from_pretrained(path, local_files_only=True)
+    if "action_head" in host:
+        from prismatic.extern.hf.action_chunks import validate_action_head
+        config.action_head = validate_action_head(host["action_head"])
     if getattr(config.text_config, "pretraining_tp", 1) != 1:
         raise ValueError("pretraining_tp must equal 1: TP sliced F.linear branches bypass adapter wrappers")
     with init_empty_weights():
@@ -251,12 +270,20 @@ def load_host(host, training=False):
     if training and dtype == torch.float16:
         raise ValueError("Reference trainer supports BF16 or FP32; FP16 requires a scaler")
     config = OpenVLAConfig.from_pretrained(path, local_files_only=True)
+    if "action_head" in host:
+        from prismatic.extern.hf.action_chunks import validate_action_head
+        config.action_head = validate_action_head(host["action_head"])
     if getattr(config.text_config, "pretraining_tp", 1) != 1:
         raise ValueError("pretraining_tp must equal 1: TP sliced F.linear branches bypass adapter wrappers")
+    new_head = config.action_head if host.get("action_head") is not None else None
+    if new_head is not None:
+        config.action_head = None
     start = time.perf_counter()
     model = OpenVLAForActionPrediction.from_pretrained(
         path, config=config, local_files_only=True, torch_dtype=dtype,
         attn_implementation=host.get("attention", "flash_attention_2"), low_cpu_mem_usage=True)
+    if new_head is not None:
+        model.configure_action_head(new_head)
     model.to(device).eval()
     stats = path / "dataset_statistics.json"
     if stats.exists():
@@ -306,6 +333,11 @@ class OpenVLAQuICPolicy:
             prompt = f"{OPENVLA_V01_SYSTEM_PROMPT} USER: What action should the robot take to {instruction.lower()}? ASSISTANT:"
         else:
             raise ValueError("prompt_style must be modern or v01")
+        if getattr(self.model, "action_head", None) is not None:
+            if style != "modern":
+                raise ValueError("Action chunk heads require the modern prompt")
+            from .action_heads import chunk_prompt
+            prompt = chunk_prompt(instruction)
         inputs = self.processor(prompt, pil_image)
         inputs = inputs.to(self.host.get("device", "cuda:0"), dtype=self.model.dtype)
         self.model.eval()

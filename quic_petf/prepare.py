@@ -20,6 +20,7 @@ def prepare(config, output):
     from prismatic.vla.datasets.rlds.oxe.transforms import OXE_STANDARDIZATION_TRANSFORMS
     from .data import SCHEMA
     settings = config["data"]
+    chunk_mode = config.get("host", {}).get("action_head") is not None
     name = settings["dataset_name"]
     if name not in OXE_DATASET_CONFIGS or name not in OXE_STANDARDIZATION_TRANSFORMS:
         raise ValueError("Source needs an OXE dataset mapping and action standardizer; no benchmark plugin is required")
@@ -107,7 +108,13 @@ def prepare(config, output):
             actions.append(action)
             instructions.append(text(whole["language_instruction"][index]))
         file = hashlib.sha256(identifier.encode()).hexdigest() + ".npz"
-        np.savez_compressed(output / file, images=np.stack(images), actions=np.stack(actions), instructions=np.asarray(instructions))
+        arrays = {"images": np.stack(images), "actions": np.stack(actions), "instructions": np.asarray(instructions)}
+        if chunk_mode:
+            # Sample images/start positions, retaining unsampled future control steps.
+            arrays.update(action_trajectory=np.asarray(whole["action"].numpy(), dtype=np.float32),
+                          action_indices=np.asarray(indices, dtype=np.int64),
+                          instruction_trajectory=np.asarray([text(value) for value in whole["language_instruction"]]))
+        np.savez_compressed(output / file, **arrays)
         records.append({**selected[identifier], "file": file, "sha256": sha256_file(output / file), "frames": len(indices)})
     if len(records) != len(selected):
         raise ValueError("Selected source episodes changed after cataloguing")
@@ -126,5 +133,7 @@ def prepare(config, output):
         "source": {"name": name, "split": split,
             "dataset_info_sha256": sha256_file(Path(builder.data_dir) / "dataset_info.json"),
             "standardizer_sha256": hashlib.sha256(inspect.getsource(standardize).encode()).hexdigest()}}
+    if chunk_mode:
+        manifest["preprocessing"]["full_action_trajectories"] = True
     write_json(output / "manifest.json", manifest)
     return output / "manifest.json"

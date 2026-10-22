@@ -507,7 +507,14 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         """
         from quic_petf_vla import inject
         self._check_quic_host()
-        return inject(self, targets)
+        if any(name.startswith("action_head.") for name in targets):
+            raise ValueError("The optional action head is trained in full and cannot be a QuIC target")
+        if self.action_head is not None and "language_model.lm_head" in targets:
+            raise ValueError("The chunk branch does not use language_model.lm_head")
+        manifest = inject(self, targets)
+        if self.action_head is not None:
+            self.action_head.requires_grad_(True)
+        return manifest
 
     def quic_parameters(self):
         """Return only trainable QuIC parameters for an optimizer."""
@@ -516,14 +523,14 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
 
     def save_quic_adapter(self, directory, host_identity, metadata=None):
         """Export adapter-only tensors bound to an immutable dense-host identity."""
-        from quic_petf_vla import save_adapter
-        return save_adapter(self, directory, host_identity, metadata=metadata)
+        from quic_petf.action_heads import save_policy_adapter
+        return save_policy_adapter(self, directory, host_identity, metadata=metadata)
 
     def load_quic_adapter(self, directory, host_identity):
         """Verify and attach an adapter before ordinary ``predict_action`` calls."""
-        from quic_petf_vla import load_adapter
+        from quic_petf.action_heads import load_policy_adapter
         self._check_quic_host()
-        return load_adapter(self, directory, host_identity)
+        return load_policy_adapter(self, directory, host_identity)
 
     def save_pretrained(self, *args, **kwargs):
         from quic_petf_vla import QuICLinear, QuICConv2d
@@ -534,6 +541,8 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
     def __init__(self, config: OpenVLAConfig) -> None:
         super().__init__(config)
         self.norm_stats = config.norm_stats
+        self.action_head = None
+        self.configure_action_head(getattr(config, "action_head", None))
 
         # Compute action bins
         self.bins = np.linspace(-1, 1, config.n_action_bins)
@@ -542,10 +551,75 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         # Compute vocab size for de-tokenization -- revert added "multiple of"
         self.vocab_size = self.config.text_config.vocab_size - self.config.pad_to_multiple_of
 
+    def configure_action_head(self, specification):
+        """Build with or without the optional head before injecting QuIC adapters."""
+        from .action_chunks import ActionChunkHead, validate_action_head
+        specification = validate_action_head(specification)
+        if self.action_head is not None:
+            if self.config.action_head == specification:
+                return
+            raise ValueError("Construct a fresh model to change or remove an existing action head")
+        self.config.action_head = specification
+        if specification is not None:
+            reference = self.get_input_embeddings().weight
+            self.action_head = ActionChunkHead(self.config.text_config.hidden_size, specification).to(
+                device=reference.device)
+
+    def adaptation_parameters(self):
+        """QuIC parameters plus the fully trainable optional readout."""
+        result = list(self.quic_parameters())
+        if self.action_head is not None:
+            result.extend(self.action_head.parameters())
+        return result
+
+    def forward(self, input_ids=None, attention_mask=None, pixel_values=None, labels=None,
+                inputs_embeds=None, past_key_values=None, use_cache=None, output_attentions=None,
+                output_hidden_states=None, output_projector_features=None, return_dict=None,
+                actions=None, action_mask=None):
+        if self.action_head is None:
+            if actions is not None or action_mask is not None:
+                raise ValueError("Action chunk targets require an enabled action_head")
+            return super().forward(input_ids=input_ids, attention_mask=attention_mask, pixel_values=pixel_values,
+                labels=labels, inputs_embeds=inputs_embeds, past_key_values=past_key_values, use_cache=use_cache,
+                output_attentions=output_attentions, output_hidden_states=output_hidden_states,
+                output_projector_features=output_projector_features, return_dict=return_dict)
+        if labels is not None or inputs_embeds is not None or past_key_values is not None:
+            raise ValueError("Chunk forward accepts prompt tokens, images and optional regression targets only")
+        from .action_chunks import forward_action_chunk
+        return forward_action_chunk(self, input_ids, pixel_values, attention_mask, actions, action_mask)
+
+    @torch.inference_mode()
+    def predict_action_chunk(self, input_ids=None, unnorm_key=None, **kwargs):
+        if self.action_head is None:
+            raise ValueError("Action chunk head is disabled")
+        if input_ids is None or input_ids.shape[0] != 1:
+            raise ValueError("predict_action_chunk expects one observation")
+        if self.get_action_dim(unnorm_key) != 7:
+            raise ValueError("Chunk head requires seven dimensional normalization")
+        output = self(input_ids=input_ids, pixel_values=kwargs.pop("pixel_values", None),
+                      attention_mask=kwargs.pop("attention_mask", None))
+        kwargs.pop("do_sample", None)
+        if kwargs:
+            raise ValueError(f"Unsupported chunk prediction options: {sorted(kwargs)}")
+        normalized = output.actions[0].float().cpu().numpy()
+        stats = self.get_action_stats(unnorm_key)
+        low, high = np.array(stats["q01"]), np.array(stats["q99"])
+        mask = np.asarray(stats.get("mask", [True] * 7), dtype=bool)
+        if not np.isfinite(normalized).all():
+            raise ValueError("Action head returned nonfinite predictions")
+        normalized = np.where(mask, np.clip(normalized, -1, 1), normalized)
+        # OXE's unnormalized EEF gripper coordinate uses [0,1].
+        if not mask[-1]:
+            normalized[:, -1] = np.clip(normalized[:, -1], 0, 1)
+        return np.where(mask, .5 * (normalized + 1) * (high - low) + low, normalized)
+
     def predict_action(
         self, input_ids: Optional[torch.LongTensor] = None, unnorm_key: Optional[str] = None, **kwargs: str
     ) -> np.ndarray:
         """Thin wrapper around .generate() that decodes predicted actions and unnormalizes them."""
+        if self.action_head is not None:
+            return self.predict_action_chunk(input_ids=input_ids, unnorm_key=unnorm_key, **kwargs)
+
         # If the special empty token ('') does not already appear after the colon (':') token in the prompt
         # (after "OUT:" or "ASSISTANT:"), insert it to match the inputs seen at training time
         if not torch.all(input_ids[:, -1] == 29871):

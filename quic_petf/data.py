@@ -77,9 +77,14 @@ def normalize_actions(actions, statistics):
 
 
 class EpisodeDataset(Dataset):
-    def __init__(self, path, manifest, split, processor, statistics):
+    def __init__(self, path, manifest, split, processor, statistics, action_head=None):
         from prismatic.vla.action_tokenizer import ActionTokenizer
         self.path, self.processor, self.statistics = path, processor, statistics
+        self.action_head = action_head
+        self.require_complete_actions = bool(manifest.get("preprocessing", {}).get("full_action_trajectories", False))
+        if (action_head is not None and manifest.get("selection", {}).get("frame_stride", 1) != 1
+                and not manifest.get("preprocessing", {}).get("full_action_trajectories", False)):
+            raise ValueError("Chunk training needs unsampled actions; prepare again with host.action_head enabled")
         self.rows = [row for row in manifest["episodes"] if row["split"] == split]
         self.ends = np.cumsum([row["frames"] for row in self.rows]).tolist()
         self.action_tokenizer = ActionTokenizer(processor.tokenizer)
@@ -103,12 +108,40 @@ class EpisodeDataset(Dataset):
                 raise ValueError("Episode arrays require matching frame counts and uint8 [F,H,W,3] images")
             if "instructions" in self.arrays and self.arrays["instructions"].shape != (row["frames"],):
                 raise ValueError("instructions must contain one string per frame")
+            if self.action_head is not None and self.require_complete_actions and "action_trajectory" not in self.arrays:
+                raise ValueError("Prepared chunk episode is missing its complete action trajectory")
+            if self.action_head is not None and "action_trajectory" in self.arrays:
+                trajectory = self.arrays["action_trajectory"]
+                indices = self.arrays.get("action_indices")
+                instructions = self.arrays.get("instruction_trajectory")
+                if (trajectory.ndim != 2 or trajectory.shape[1] != 7 or indices is None
+                        or indices.shape != (row["frames"],) or not np.issubdtype(indices.dtype, np.integer)
+                        or np.any(indices < 0) or np.any(indices >= len(trajectory))
+                        or instructions is None or instructions.shape != (len(trajectory),)):
+                    raise ValueError("Malformed complete action trajectory or sampled frame indices")
+                if not np.array_equal(self.arrays["actions"], trajectory[indices]):
+                    raise ValueError("Selected actions differ from their complete trajectory indices")
+            elif self.action_head is not None and self.arrays.get("action_indices") is not None:
+                raise ValueError("Sampled action indices require their complete trajectory")
             self.cached = position
         instruction = (self.arrays["instructions"][frame] if "instructions" in self.arrays
                        else row.get("language_instruction", row.get("instruction", "")))
         instruction = instruction.decode("utf-8") if isinstance(instruction, bytes) else instruction
         if not isinstance(instruction, str) or not instruction.strip():
             raise ValueError("Each frame requires a nonempty language instruction")
+        if self.action_head is not None:
+            from .action_heads import action_window, ChunkBatchTransform
+            complete = self.arrays.get("action_trajectory", self.arrays["actions"])
+            start = int(self.arrays["action_indices"][frame]) if "action_trajectory" in self.arrays else frame
+            instructions = self.arrays.get("instruction_trajectory", self.arrays.get("instructions"))
+            actions, valid = action_window(complete, start, self.action_head["horizon"], instructions)
+            normalized = np.zeros_like(actions)
+            for offset in np.flatnonzero(valid):
+                normalized[offset] = normalize_actions(actions[offset], self.statistics)
+            return ChunkBatchTransform(self.processor, self.action_head["horizon"])({
+                "action": normalized, "action_mask": valid,
+                "observation": {"image_primary": self.arrays["images"][frame:frame + 1]},
+                "task": {"language_instruction": instruction}})
         action = normalize_actions(self.arrays["actions"][frame], self.statistics)
         tokenizer = self.processor.tokenizer
         prompt = (f"In: What action should the robot take to {instruction.lower()}?\nOut: "

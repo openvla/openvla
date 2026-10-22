@@ -11,6 +11,10 @@ def adapter_host(host, adapter_path):
     payload = json.loads((Path(adapter_path) / "adapter.json").read_text())
     saved = payload["host_identity"]
     host.setdefault("checkpoint_id", saved["checkpoint_id"])
+    if "action_head" in host and host["action_head"] != saved.get("action_head"):
+        raise ValueError("Requested model action head differs from artifact")
+    if saved.get("action_head") is not None:
+        host["action_head"] = saved["action_head"]
     metadata = payload.get("metadata", {})
     preprocessing = metadata.get("preprocessing", {})
     for key in ("prompt_style", "center_crop"):
