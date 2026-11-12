@@ -18,7 +18,7 @@ authors = [
 ]
 keywords = ["openvla", "quic", "vision-language-action", "fine-tuning"]
 dependencies = [
-    "quic-petf-vla @ git+https://github.com/kon0327/quic-peft-vla.git@4b59894c5f970649ad6a8c720f80809724de6b9d",
+    "quic-petf-vla @ git+https://github.com/kon0327/quic-peft-vla.git",
     "torch==2.2.0",
     "torchvision==0.17.0",
     "transformers==4.40.1",
