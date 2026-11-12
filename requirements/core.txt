@@ -1,5 +1,5 @@
 # Dense token OpenVLA inference and prepared-NPZ QuIC training.
-quic-petf-vla @ git+https://github.com/kon0327/quic-peft-vla.git
+quic-petf-vla @ git+https://github.com/kon0327/quic-peft-vla.git@e727b31c2e4e160c29c0dbe865be093bdd65e5e2
 torch==2.2.0
 torchvision==0.17.0
 transformers==4.40.1
