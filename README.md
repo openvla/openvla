@@ -145,6 +145,20 @@ The current standalone tuner is single-process and adapter-only. It supports
 neither quantized hosts nor active LoRA wrappers. Validation is teacher-forced;
 rollout success belongs to the optional environment experiment.
 
+Set `"training": {"deterministic": true}` for bitwise reproducible training on a
+fixed GPU and software stack. The flash and memory-efficient SDPA kernels sum the
+query gradient with atomics, so two identical runs otherwise diverge in the last
+bits from the second optimizer step on. The option selects the math SDPA backend,
+which requires `host.attention` `sdpa` or `eager`; `flash_attention_2` is rejected.
+On OpenVLA-7B with batch 1 the math backend did not slow training down. Its
+attention memory grows quadratically, so measure again for long sequences or
+large batches. Inference is deterministic without the option.
+
+`host.attention` is enforced: the requested implementation is written into the
+model config before loading, because transformers 4.40 otherwise ignores `eager`
+and selects SDPA. Loading fails if the language model ends up with a different
+implementation. The value actually used is reported in `runtime.attention`.
+
 The CLI draws progress bars and prints compact summaries. Full JSON remains in
 the output directory; `--json` requests it on stdout. Historical script paths
 now dispatch to these commands: `vla-scripts/finetune.py`, `vla-scripts/deploy.py`,

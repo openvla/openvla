@@ -32,6 +32,7 @@
     "validation_batches": 4,
     "learning_rate": 0.0001,
     "gradient_checkpointing": true,
-    "max_trainable_parameters": 1000000
+    "max_trainable_parameters": 1000000,
+    "deterministic": false
   }
 }

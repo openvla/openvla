@@ -278,10 +278,18 @@ def load_host(host, training=False):
     new_head = config.action_head if host.get("action_head") is not None else None
     if new_head is not None:
         config.action_head = None
+    attention = host.get("attention", "flash_attention_2")
+    # transformers 4.40 ignores attn_implementation="eager" when the saved config sets no
+    # implementation (its _attn_implementation property already reads "eager") and then
+    # auto-selects SDPA. Setting it on the config marks the choice as explicit.
+    config._attn_implementation = attention
     start = time.perf_counter()
     model = OpenVLAForActionPrediction.from_pretrained(
         path, config=config, local_files_only=True, torch_dtype=dtype,
-        attn_implementation=host.get("attention", "flash_attention_2"), low_cpu_mem_usage=True)
+        attn_implementation=attention, low_cpu_mem_usage=True)
+    actual = model.language_model.config._attn_implementation
+    if actual != attention:
+        raise ValueError(f"Requested attention {attention!r}, but the language model uses {actual!r}")
     if new_head is not None:
         model.configure_action_head(new_head)
     model.to(device).eval()
@@ -300,7 +308,7 @@ def load_host(host, training=False):
         raise ValueError(f"Host normalization key {key!r} missing; available: {list(model.norm_stats or {})}")
     processor = load_processor(host)
     runtime = {"cold_load_seconds": time.perf_counter() - start,
-               "device": device, "dtype": str(dtype),
+               "device": device, "dtype": str(dtype), "attention": actual,
                "torch_version": torch.__version__, "torch_cuda_runtime": torch.version.cuda}
     if device.startswith("cuda"):
         properties = torch.cuda.get_device_properties(device)

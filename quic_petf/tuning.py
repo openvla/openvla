@@ -72,7 +72,7 @@ def validate(model, loader, *, device, max_batches=4, description="Validation"):
 def training_settings(config):
     defaults = {"max_steps": 3, "batch_size": 1, "gradient_accumulation_steps": 1,
                 "validation_batches": 4, "learning_rate": 1e-4, "seed": 7,
-                "gradient_checkpointing": True, "max_trainable_parameters": 1000000}
+                "gradient_checkpointing": True, "max_trainable_parameters": 1000000, "deterministic": False}
     values = config.get("training", {})
     if set(values) - defaults.keys():
         raise ValueError(f"Unknown training fields: {sorted(set(values) - defaults.keys())}")
@@ -82,10 +82,28 @@ def training_settings(config):
             raise ValueError(f"training.{key} must be a positive integer")
     if (type(defaults["seed"]) is not int or defaults["seed"] < 0
             or type(defaults["gradient_checkpointing"]) is not bool
+            or type(defaults["deterministic"]) is not bool
             or not isinstance(defaults["learning_rate"], (int, float))
             or not math.isfinite(defaults["learning_rate"]) or defaults["learning_rate"] <= 0):
-        raise ValueError("Invalid seed, gradient-checkpointing flag, or learning rate")
+        raise ValueError("Invalid seed, gradient-checkpointing/deterministic flag, or learning rate")
     return defaults
+
+
+def enable_deterministic_attention(host):
+    """Make training steps bitwise reproducible on a fixed GPU/software stack.
+
+    The flash and memory-efficient SDPA kernels accumulate the query gradient (dQ) with atomics,
+    so identical steps differ in the last bits and the difference grows over training. The math
+    SDPA backend (and eager attention) computes attention with ordinary matmuls. Process-wide.
+    """
+    import torch
+    attention = host.get("attention", "flash_attention_2")
+    if attention not in {"sdpa", "eager"}:
+        raise ValueError("training.deterministic requires host.attention 'sdpa' or 'eager'; "
+                         f"{attention!r} has a non-deterministic backward")
+    torch.backends.cuda.enable_flash_sdp(False)
+    torch.backends.cuda.enable_mem_efficient_sdp(False)
+    torch.backends.cuda.enable_math_sdp(True)
 
 
 def train(config, output, *, fit_action_normalization=False):
@@ -103,6 +121,8 @@ def train(config, output, *, fit_action_normalization=False):
     host = config["host"]
     if host.get("prompt_style", "modern") != "modern" or host.get("center_crop", False):
         raise ValueError("This trainer uses the modern prompt without crop augmentation")
+    if settings["deterministic"]:
+        enable_deterministic_attention(host)
     random.seed(settings["seed"])
     np.random.seed(settings["seed"] % 2**32)
     torch.manual_seed(settings["seed"])
