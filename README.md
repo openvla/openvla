@@ -150,9 +150,12 @@ fixed GPU and software stack. The flash and memory-efficient SDPA kernels sum th
 query gradient with atomics, so two identical runs otherwise diverge in the last
 bits from the second optimizer step on. The option selects the math SDPA backend,
 which requires `host.attention` `sdpa` or `eager`; `flash_attention_2` is rejected.
-On OpenVLA-7B with batch 1 the math backend did not slow training down. Its
-attention memory grows quadratically, so measure again for long sequences or
-large batches. Inference is deterministic without the option.
+Measured on an A100 with OpenVLA-7B, batch 1 and gradient checkpointing: two runs
+with the option were bitwise identical (loss at every step, adapter, validation),
+for `sdpa` and for `eager`. Training was about 8 % slower than the default
+kernels: 5.5–5.7 against 6.1 steps/s with `sdpa`, 5.1–5.4 with `eager`. The math
+backend's attention memory grows quadratically, so measure again for long
+sequences or large batches. Inference is deterministic without the option.
 
 `host.attention` is enforced: the requested implementation is written into the
 model config before loading, because transformers 4.40 otherwise ignores `eager`
