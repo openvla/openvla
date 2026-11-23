@@ -70,8 +70,17 @@ class OpenVLAServer:
             => Takes in {"image": np.ndarray, "instruction": str, "unnorm_key": Optional[str]}
             => Returns  {"action": np.ndarray}
         """
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda:0")
+        elif hasattr(torch, "xpu") and torch.xpu.is_available():
+            self.device = torch.device("xpu:0")
+        else:
+            self.device = torch.device("cpu")
+
+        # Flash Attention 2 needs CUDA; other devices use PyTorch scaled dot product attention (SDPA)
+        if self.device.type != "cuda" and attn_implementation == "flash_attention_2":
+            attn_implementation = "sdpa"
         self.openvla_path, self.attn_implementation = openvla_path, attn_implementation
-        self.device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 
         # Load VLA Model using HF AutoClasses
         self.processor = AutoProcessor.from_pretrained(self.openvla_path, trust_remote_code=True)

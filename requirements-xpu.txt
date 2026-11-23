@@ -1,0 +1,24 @@
+# Dependencies for OpenVLA inference on Intel GPUs (XPU), for Python 3.12.
+# The list in pyproject.toml without torch, torchvision and torchaudio: install the XPU build of PyTorch first.
+# tensorflow 2.16.2 and sentencepiece 0.2.0 replace 2.15.0 and 0.1.99, which have no Python 3.12 wheels.
+# dlimp and tensorflow_graphics are installed separately with --no-deps (see README.md), since they pin
+# tensorflow 2.15.0 or need tensorflow-addons, neither of which exists for Python 3.12.
+accelerate>=0.25.0
+draccus==0.8.0
+einops
+huggingface_hub
+json-numpy
+jsonlines
+matplotlib
+peft==0.11.1
+protobuf
+rich
+sentencepiece==0.2.0
+timm==0.9.10
+tokenizers==0.19.1
+transformers==4.40.1
+wandb
+tensorflow==2.16.2
+tensorflow-metadata<1.17  # newer releases need protobuf 5, tensorflow 2.16 needs protobuf 4
+tensorflow_datasets==4.9.3
+setuptools<81  # tensorflow 2.16 imports distutils, which Python 3.12 no longer ships
