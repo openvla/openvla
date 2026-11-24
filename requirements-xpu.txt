@@ -19,6 +19,6 @@ tokenizers==0.19.1
 transformers==4.40.1
 wandb
 tensorflow==2.16.2
-tensorflow-metadata<1.17  # newer releases need protobuf 5, tensorflow 2.16 needs protobuf 4
+tensorflow-metadata<1.18  # 1.21 imports protobuf 5 code (its metadata allows protobuf 4); tensorflow 2.16 needs protobuf 4
 tensorflow_datasets==4.9.3
-setuptools<81  # tensorflow 2.16 imports distutils, which Python 3.12 no longer ships
+setuptools  # tensorflow 2.16 imports distutils, which Python 3.12 only gets from setuptools
