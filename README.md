@@ -152,8 +152,10 @@ to generate actions, and actions alone).
 
 The inference code runs on an Intel GPU (XPU) when no NVIDIA GPU is present: `vla-scripts/deploy.py`,
 `vla-scripts/extern/verify_openvla.py` and the evaluation scripts under `experiments/robot/` pick the device by
-themselves and load the model with PyTorch SDPA attention instead of Flash Attention 2. Set up the environment with
-Python 3.12 and the XPU build of PyTorch instead of the steps above:
+themselves and load the model with PyTorch SDPA attention instead of Flash Attention 2. Install a current Intel GPU
+driver first, as described in PyTorch's [Getting Started on Intel GPU](https://docs.pytorch.org/docs/stable/notes/get_start_xpu.html)
+(with an older driver the first operation on the GPU can abort). Then set up the environment with Python 3.12 and the
+XPU build of PyTorch instead of the steps above:
 
 ```bash
 python3.12 -m venv openvla-xpu
@@ -178,7 +180,7 @@ the ones in its setup section (the evaluation command stays the same):
 ```bash
 git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git
 pip install -e LIBERO --config-settings editable_mode=compat  # so that `libero` imports with recent setuptools
-pip install -r experiments/robot/libero/libero_requirements.txt "numpy<2" "mujoco==3.2.7"
+pip install -r experiments/robot/libero/libero_requirements.txt "numpy<2" "mujoco==3.2.7"  # TensorFlow 2.16 needs NumPy 1; robosuite 1.4.1 fails with MuJoCo 4
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1  # LIBERO loads its initial states with `torch.load`
 ```
 
