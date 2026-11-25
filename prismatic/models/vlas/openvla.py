@@ -75,8 +75,10 @@ class OpenVLA(PrismaticVLM):
             raise ValueError(f"Unsupported `pixel_values` type = {type(pixel_values)}")
 
         # Invoke super().generate --> taps into `GenerationMixin` which (redirects) to `forward()`
+        # Mixed precision on the accelerator the model is on (CUDA or XPU); the CPU keeps full precision as before
         autocast_dtype = self.llm_backbone.half_precision_dtype
-        with torch.autocast("cuda", dtype=autocast_dtype, enabled=self.enable_mixed_precision_training):
+        use_autocast = self.enable_mixed_precision_training and self.device.type != "cpu"
+        with torch.autocast(self.device.type, dtype=autocast_dtype, enabled=use_autocast):
             # fmt: off
             generated_ids = super(PrismaticVLM, self).generate(
                 input_ids=input_ids,                            # Shape: [1, seq]

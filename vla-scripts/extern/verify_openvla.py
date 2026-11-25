@@ -30,17 +30,23 @@ def get_openvla_prompt(instruction: str) -> str:
 @torch.inference_mode()
 def verify_openvla() -> None:
     print(f"[*] Verifying OpenVLAForActionPrediction using Model `{MODEL_PATH}`")
-    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif hasattr(torch, "xpu") and torch.xpu.is_available():
+        device = torch.device("xpu")
+    else:
+        device = torch.device("cpu")
 
     # Load Processor & VLA
     print("[*] Instantiating Processor and Pretrained OpenVLA")
     processor = AutoProcessor.from_pretrained(MODEL_PATH, trust_remote_code=True)
 
-    # === BFLOAT16 + FLASH-ATTN MODE ===
-    print("[*] Loading in BF16 with Flash-Attention Enabled")
+    # === BFLOAT16 + FLASH-ATTN MODE (Flash Attention 2 needs CUDA; other devices use PyTorch SDPA) ===
+    attn_implementation = "flash_attention_2" if device.type == "cuda" else "sdpa"
+    print(f"[*] Loading in BF16 with attention implementation `{attn_implementation}` on {device}")
     vla = AutoModelForVision2Seq.from_pretrained(
         MODEL_PATH,
-        attn_implementation="flash_attention_2",
+        attn_implementation=attn_implementation,
         torch_dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
         trust_remote_code=True,

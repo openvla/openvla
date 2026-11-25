@@ -148,6 +148,44 @@ visually-conditioned language models; while you can use this repo to train VLMs 
 language (via `scripts/generate.py`) with existing OpenVLA models will not work (as we only train current OpenVLA models
 to generate actions, and actions alone).
 
+### Run on Intel GPU (XPU)
+
+The inference code runs on an Intel GPU (XPU) when no NVIDIA GPU is present: `vla-scripts/deploy.py`,
+`vla-scripts/extern/verify_openvla.py` and the evaluation scripts under `experiments/robot/` pick the device by
+themselves and load the model with PyTorch SDPA attention instead of Flash Attention 2. Install a current Intel GPU
+driver first, as described in PyTorch's [Getting Started on Intel GPU](https://docs.pytorch.org/docs/stable/notes/get_start_xpu.html)
+(with an older driver the first operation on the GPU can abort). Then set up the environment with Python 3.12 and the
+XPU build of PyTorch instead of the steps above:
+
+```bash
+python3.12 -m venv openvla-xpu
+source openvla-xpu/bin/activate
+pip install torch torchvision --index-url https://download.pytorch.org/whl/xpu
+git clone https://github.com/openvla/openvla.git
+cd openvla
+pip install -e . --no-deps
+pip install -r requirements-xpu.txt
+pip install --no-deps "dlimp @ git+https://github.com/moojink/dlimp_openvla" "tensorflow_graphics==2021.12.3"
+
+# Load OpenVLA 7B on the XPU and predict actions for random images
+python vla-scripts/extern/verify_openvla.py
+```
+
+In your own code (such as the inference example in [Getting Started](#getting-started)), load the model with
+`attn_implementation="sdpa"` and move the model and the inputs to `"xpu:0"` instead of `"cuda:0"`.
+
+For the [LIBERO evaluations](#libero-simulation-benchmark-evaluations), install LIBERO with these lines instead of
+the ones in its setup section (the evaluation command stays the same):
+
+```bash
+git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git
+pip install -e LIBERO --config-settings editable_mode=compat  # so that `libero` imports with recent setuptools
+pip install -r experiments/robot/libero/libero_requirements.txt "numpy<2" "mujoco==3.2.7"  # TensorFlow 2.16 needs NumPy 1; robosuite 1.4.1 fails with MuJoCo 4
+export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1  # LIBERO loads its initial states with `torch.load`
+```
+
+Training, fine-tuning, Flash Attention 2 and 8-bit or 4-bit loading (bitsandbytes) stay CUDA-only.
+
 ## Fine-Tuning OpenVLA via LoRA
 
 **(2025-03-03 Update: We recommend trying the new OFT recipe for fine-tuning OpenVLA to produce faster and more successful policies. See project website [here](https://openvla-oft.github.io/).)**

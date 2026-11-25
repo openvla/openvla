@@ -14,11 +14,21 @@ from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
 from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
 
+
+def get_default_device() -> torch.device:
+    """Returns the first available accelerator (NVIDIA CUDA, then Intel XPU), else the CPU."""
+    if torch.cuda.is_available():
+        return torch.device("cuda:0")
+    if hasattr(torch, "xpu") and torch.xpu.is_available():
+        return torch.device("xpu:0")
+    return torch.device("cpu")
+
+
 # Initialize important constants and pretty-printing mode in NumPy.
 ACTION_DIM = 7
 DATE = time.strftime("%Y_%m_%d")
 DATE_TIME = time.strftime("%Y_%m_%d-%H_%M_%S")
-DEVICE = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+DEVICE = get_default_device()
 np.set_printoptions(formatter={"float": lambda x: "{0:0.3f}".format(x)})
 
 # Initialize system prompt for OpenVLA v0.1.
@@ -31,8 +41,10 @@ OPENVLA_V01_SYSTEM_PROMPT = (
 def get_vla(cfg):
     """Loads and returns a VLA model from checkpoint."""
     # Load VLA checkpoint.
+    # Flash Attention 2 needs CUDA; other devices use PyTorch scaled dot product attention (SDPA).
+    attn_implementation = "flash_attention_2" if DEVICE.type == "cuda" else "sdpa"
     print("[*] Instantiating Pretrained VLA model")
-    print("[*] Loading in BF16 with Flash-Attention Enabled")
+    print(f"[*] Loading in BF16 with attention implementation `{attn_implementation}` on {DEVICE}")
 
     # Register OpenVLA model to HF Auto Classes (not needed if the model is on HF Hub)
     AutoConfig.register("openvla", OpenVLAConfig)
@@ -42,7 +54,7 @@ def get_vla(cfg):
 
     vla = AutoModelForVision2Seq.from_pretrained(
         cfg.pretrained_checkpoint,
-        attn_implementation="flash_attention_2",
+        attn_implementation=attn_implementation,
         torch_dtype=torch.bfloat16,
         load_in_8bit=cfg.load_in_8bit,
         load_in_4bit=cfg.load_in_4bit,
